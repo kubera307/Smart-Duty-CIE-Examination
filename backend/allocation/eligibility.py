@@ -63,9 +63,11 @@ class EligibilityEngine:
             checks_passed.append(f"{faculty.name} verified as designated Squad Duty officer.")
 
         # 3. Capacity Ceiling Check (strictly scoped to this CIE cycle's run_assigned_count)
+        # SQUAD DUTY: Squad-designated officers (e.g. Dr. Arjun B C) are exempt from room capacity ceiling
+        is_squad_exempt = is_squad_only and duty_type == 'Squad Duty'
         eff_capacity = faculty.max_duty_capacity if faculty.max_duty_capacity is not None else 10
         total_workload = run_assigned_count
-        if not ignore_capacity and total_workload >= eff_capacity:
+        if not ignore_capacity and not is_squad_exempt and total_workload >= eff_capacity:
             disqualifications.append(
                 f"Maximum workload capacity reached ({total_workload}/{eff_capacity} duties assigned in this CIE cycle)."
             )
@@ -109,26 +111,23 @@ class EligibilityEngine:
         if not has_overlap:
             checks_passed.append("No simultaneous exam duty commitments.")
 
-        # 6. Timetable & Buffer Conflict Check
-        if regular_semester_ids and len(regular_semester_ids) > 0:
-            tt_result = TimetableConflictEngine.check_faculty_timetable_conflicts(
-                faculty=faculty,
-                exam_session=exam_session,
-                regular_semester_ids=regular_semester_ids,
-                buffer_minutes=buffer_minutes
-            )
+        # 6. Timetable & Buffer Conflict Check (Always evaluate to protect Robotics and regular semester classes)
+        tt_result = TimetableConflictEngine.check_faculty_timetable_conflicts(
+            faculty=faculty,
+            exam_session=exam_session,
+            regular_semester_ids=regular_semester_ids or set(),
+            buffer_minutes=buffer_minutes
+        )
 
-            if tt_result['has_conflict']:
-                for conf in tt_result['conflicts']:
-                    conflict_details.append(conf)
-                    disqualifications.append(
-                        f"Timetable Conflict [{conf['semester_name']}]: {conf['subject_code']} lecture "
-                        f"({conf['class_time']}) violates {buffer_minutes}m buffer protection."
-                    )
-            else:
-                checks_passed.append(f"Timetable clear across regular semesters with protected {buffer_minutes}m buffer.")
+        if tt_result['has_conflict']:
+            for conf in tt_result['conflicts']:
+                conflict_details.append(conf)
+                disqualifications.append(
+                    f"Timetable Conflict [{conf['semester_name']}]: {conf['subject_code']} lecture "
+                    f"({conf['class_time']}) violates {buffer_minutes}m buffer protection."
+                )
         else:
-            checks_passed.append("No regular classes active during this exam session.")
+            checks_passed.append(f"Timetable clear across regular and Robotics classes with protected {buffer_minutes}m buffer.")
 
         is_eligible = len(disqualifications) == 0
 

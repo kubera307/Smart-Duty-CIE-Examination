@@ -30,19 +30,17 @@ class SemesterStatusEngine:
         """
         all_sem_map = {s.id: s for s in all_active_semesters}
         
-        # If CIE-wide exam semesters are known, any semester taking exams in this CIE
-        # is considered an exam semester; otherwise identify from slot sessions
-        if cie_exam_semester_ids:
-            exam_sem_ids = {sid for sid in cie_exam_semester_ids if sid in all_sem_map}
-        else:
-            exam_sem_ids = {session.semester_id for session in slot_sessions if session.semester_id in all_sem_map}
+        # The semesters participating in exams during this specific slot
+        slot_exam_sem_ids = {session.semester_id for session in slot_sessions if session.semester_id in all_sem_map}
+        if not slot_exam_sem_ids and cie_exam_semester_ids:
+            slot_exam_sem_ids = {sid for sid in cie_exam_semester_ids if sid in all_sem_map}
         
-        # The remaining active semesters are in regular class session (e.g. 3rd semester)
-        regular_sem_ids = set(all_sem_map.keys()) - exam_sem_ids
+        # The remaining active semesters have regular teaching classes and their timetables must be protected
+        regular_sem_ids = set(all_sem_map.keys()) - slot_exam_sem_ids
 
         return {
-            'exam_semester_ids': exam_sem_ids,
+            'exam_semester_ids': slot_exam_sem_ids,
             'regular_class_semester_ids': regular_sem_ids,
-            'exam_semester_names': [all_sem_map[sid].name for sid in sorted(exam_sem_ids)],
+            'exam_semester_names': [all_sem_map[sid].name for sid in sorted(slot_exam_sem_ids)],
             'regular_class_semester_names': [all_sem_map[sid].name for sid in sorted(regular_sem_ids)]
         }

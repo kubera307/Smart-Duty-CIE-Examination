@@ -1,16 +1,18 @@
 import api from './api';
 
 export const allocationApi = {
-  getPreview: (cieId, semesterId = null, semesterIds = null) => {
+  getPreview: (cieId, semesterId = null, semesterIds = null, extraParams = {}) => {
     let url = `/allocation/preview/${cieId}`;
     const params = [];
     if (semesterId) params.push(`semester_id=${semesterId}`);
     if (semesterIds && semesterIds.length > 0) params.push(`semester_ids=${semesterIds.join(',')}`);
+    if (extraParams.include_one_credit !== undefined) params.push(`include_one_credit=${extraParams.include_one_credit}`);
+    if (extraParams.include_squad !== undefined) params.push(`include_squad=${extraParams.include_squad}`);
     if (params.length > 0) url += `?${params.join('&')}`;
     return api.get(url);
   },
-  generate: (cieId, semesterId = null, semesterIds = null) => {
-    let payload = typeof cieId === 'object' ? cieId : { cie_id: cieId };
+  generate: (cieId, semesterId = null, semesterIds = null, extraData = {}) => {
+    let payload = typeof cieId === 'object' ? { ...cieId } : { cie_id: cieId, ...extraData };
     if (semesterId) payload.semester_id = semesterId;
     if (semesterIds) payload.semester_ids = semesterIds;
     return api.post('/allocation/generate', payload);

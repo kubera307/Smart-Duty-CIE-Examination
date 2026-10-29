@@ -50,6 +50,22 @@ const SEM3_OFFICIAL_LEGEND = {
   '25BCM301':  { ltp: '2-0-0', credits: 'Audit', faculty: 'Mathematics Faculty', room: 'AI303' }
 };
 const SEM3_OFFICIAL_ORDER = Object.keys(SEM3_OFFICIAL_LEGEND);
+
+const ROBOTICS_OFFICIAL_LEGEND = {
+  '25RA301':  { ltp: '3-2-0', credits: '4', faculty: 'Mr. Adithya G N', room: 'MB210' },
+  '25RA302':  { ltp: '3-0-2', credits: '4', faculty: 'Mrs. Maseeha Banu', room: 'MB210 / SA-205' },
+  '25RA303':  { ltp: '3-0-0', credits: '3', faculty: 'Dr. Yashas Gowda T G', room: 'MB210' },
+  '25RA304':  { ltp: '3-0-0', credits: '3', faculty: 'Dr. Swathi H Y', room: 'MB210' },
+  '25RA305':  { ltp: '3-0-0', credits: '3', faculty: 'Dr. ShivaShankar B S', room: 'MB210' },
+  '25RAL306': { ltp: '0-0-2', credits: '1', faculty: 'Dr. Swathi H Y, Mrs. Sheethal D N', room: 'MB-211' },
+  '25RAL307': { ltp: '0-0-2', credits: '1', faculty: 'Dr. Shashank Lingappa M, Dr. Yashas Gowda T G, Dr. Shiva Shankar B S', room: 'MB-211' },
+  '25SCR':    { ltp: '0-0-2', credits: '1', faculty: 'Mrs. Megha H C, Mrs. Sushma M V', room: 'MB210' },
+  '25PT1':    { ltp: '2-0-0', credits: 'Audit', faculty: 'Mrs. Megha H C', room: 'MB210' },
+  '25NYP1':   { ltp: '0-0-2', credits: 'Audit', faculty: 'Mrs. Maseeha Banu', room: 'MB210' },
+  '25BCM301': { ltp: '2-0-0', credits: 'Audit', faculty: 'Mathematics Faculty', room: 'MB210' }
+};
+const ROBOTICS_OFFICIAL_ORDER = Object.keys(ROBOTICS_OFFICIAL_LEGEND);
+
 const OCR_FACULTY_NAMES = {
   ABC: 'Dr. Arjun B C',
   HYS: 'Dr. Swathi H Y',
@@ -67,6 +83,7 @@ const Timetables = () => {
   const [semesters, setSemesters] = useState([]);
   const [activeSemId, setActiveSemId] = useState(null);
   const [selectedCycle, setSelectedCycle] = useState('odd'); // 'odd' (3, 5, 7) | 'even' (4, 6)
+  const [selectedBranch, setSelectedBranch] = useState('ALL'); // 'ALL' | 'AI_ML' | 'ROBOTICS'
   const [entries, setEntries] = useState([]);
   const [facultyList, setFacultyList] = useState([]);
   const [subjectsList, setSubjectsList] = useState([]);
@@ -83,6 +100,7 @@ const Timetables = () => {
   const [formStartTime, setFormStartTime] = useState('09:30');
   const [formEndTime, setFormEndTime] = useState('10:30');
   const [formRoom, setFormRoom] = useState('AI302');
+  const [formDepartment, setFormDepartment] = useState('CSE (AI & ML)');
   const [isSubmittingAdd, setIsSubmittingAdd] = useState(false);
 
   // Edit slot modal state
@@ -95,6 +113,7 @@ const Timetables = () => {
   const [editStartTime, setEditStartTime] = useState('09:30');
   const [editEndTime, setEditEndTime] = useState('10:30');
   const [editRoom, setEditRoom] = useState('AI302');
+  const [editDepartment, setEditDepartment] = useState('CSE (AI & ML)');
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
 
   // Manage / Delete slots list modal state
@@ -123,6 +142,8 @@ const Timetables = () => {
   const [isParsingImage, setIsParsingImage] = useState(false);
   const [imageParseResult, setImageParseResult] = useState(null);
   const [isImageZoomed, setIsImageZoomed] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isHighContrast, setIsHighContrast] = useState(false);
 
 
   // Inline New Subject creation state
@@ -157,24 +178,40 @@ const Timetables = () => {
   const completeSemester = semesters.find((s) => s.id === completeSemId) || activeSemester;
   const displayedSubjects = activeSemester?.sem_number === 3
     ? subjectsList
-        .filter((subject) => SEM3_OFFICIAL_ORDER.includes(subject.code))
-        .sort((a, b) => SEM3_OFFICIAL_ORDER.indexOf(a.code) - SEM3_OFFICIAL_ORDER.indexOf(b.code))
+        .filter((subject) => {
+          if (selectedBranch === 'ROBOTICS') {
+            return ROBOTICS_OFFICIAL_ORDER.includes(subject.code);
+          }
+          if (selectedBranch === 'AI_ML') {
+            return SEM3_OFFICIAL_ORDER.includes(subject.code);
+          }
+          return SEM3_OFFICIAL_ORDER.includes(subject.code) || ROBOTICS_OFFICIAL_ORDER.includes(subject.code);
+        })
+        .sort((a, b) => {
+          const order = selectedBranch === 'ROBOTICS' ? ROBOTICS_OFFICIAL_ORDER : [...SEM3_OFFICIAL_ORDER, ...ROBOTICS_OFFICIAL_ORDER];
+          const idxA = order.indexOf(a.code);
+          const idxB = order.indexOf(b.code);
+          return (idxA !== -1 ? idxA : 999) - (idxB !== -1 ? idxB : 999);
+        })
     : subjectsList;
 
-  // Location / Classroom strings based on semester
+  // Location / Classroom strings based on semester and branch
   const getLocationInfo = () => {
-    if (activeSemester?.sem_number === 3) {
-      return { classroom: 'AI303', lab: 'SA-205', cycle: 'Odd Semester (2026-27)' };
-    } else if (activeSemester?.sem_number === 4) {
-      return { classroom: 'AI302', lab: 'SA-205', cycle: 'Even Semester (2026-27)' };
-    } else if (activeSemester?.sem_number === 5) {
-      return { classroom: 'AI301*, AI302, AI303**', lab: 'SA-205', cycle: 'Odd Semester (2026-27)' };
-    } else if (activeSemester?.sem_number === 6) {
-      return { classroom: 'AI301', lab: 'SA-205', cycle: 'Even Semester (2026-27)' };
-    } else if (activeSemester?.sem_number === 7) {
-      return { classroom: 'AI301*, AI302', lab: 'SA-205', cycle: 'Odd Semester (2026-27)' };
+    if (selectedBranch === 'ROBOTICS') {
+      return { classroom: 'MB210', lab: 'MB-211 / SA-205*', cycle: 'Odd Semester (2026-27)', branchName: 'Robotics & Artificial Intelligence' };
     }
-    return { classroom: 'AI301', lab: 'SA-205', cycle: 'Academic Year 2026-27' };
+    if (activeSemester?.sem_number === 3) {
+      return { classroom: 'AI303', lab: 'SA-205', cycle: 'Odd Semester (2026-27)', branchName: 'CSE (AI & ML)' };
+    } else if (activeSemester?.sem_number === 4) {
+      return { classroom: 'AI302', lab: 'SA-205', cycle: 'Even Semester (2026-27)', branchName: 'CSE (AI & ML)' };
+    } else if (activeSemester?.sem_number === 5) {
+      return { classroom: 'AI301*, AI302, AI303**', lab: 'SA-205', cycle: 'Odd Semester (2026-27)', branchName: 'CSE (AI & ML)' };
+    } else if (activeSemester?.sem_number === 6) {
+      return { classroom: 'AI301', lab: 'SA-205', cycle: 'Even Semester (2026-27)', branchName: 'CSE (AI & ML)' };
+    } else if (activeSemester?.sem_number === 7) {
+      return { classroom: 'AI301*, AI302', lab: 'SA-205', cycle: 'Odd Semester (2026-27)', branchName: 'CSE (AI & ML)' };
+    }
+    return { classroom: 'AI301', lab: 'SA-205', cycle: 'Academic Year 2026-27', branchName: 'CSE (AI & ML)' };
   };
 
   const locInfo = getLocationInfo();
@@ -203,10 +240,10 @@ const Timetables = () => {
 
   useEffect(() => {
     if (activeSemId) {
-      loadTimetables(activeSemId);
+      loadTimetables(activeSemId, selectedBranch);
       loadSubjects(activeSemId);
     }
-  }, [activeSemId, selectedFacultyFilter]);
+  }, [activeSemId, selectedFacultyFilter, selectedBranch]);
 
   const loadInitialData = async () => {
     try {
@@ -260,11 +297,16 @@ const Timetables = () => {
     }
   };
 
-  const loadTimetables = async (semId) => {
+  const loadTimetables = async (semId, branchFilter = selectedBranch) => {
     setLoading(true);
     try {
       const params = { semester_id: semId };
       if (selectedFacultyFilter) params.faculty_id = selectedFacultyFilter;
+      if (branchFilter === 'ROBOTICS') {
+        params.department = 'Robotics';
+      } else if (branchFilter === 'AI_ML') {
+        params.department = 'CSE';
+      }
       const res = await academicApi.getTimetables(params);
       setEntries(res.data || []);
     } catch (err) {
@@ -278,13 +320,15 @@ const Timetables = () => {
     e.preventDefault();
     setIsSubmittingAdd(true);
     try {
+      const targetDept = formDepartment || (selectedBranch === 'ROBOTICS' ? 'Robotics & Artificial Intelligence' : 'CSE (AI & ML)');
       const payload = {
         semester_id: parseInt(formSemesterId || activeSemId),
         faculty_id: parseInt(formFacultyId),
         day_of_week: formDay,
         start_time: formStartTime,
         end_time: formEndTime,
-        room_number: formRoom
+        room_number: formRoom,
+        department: targetDept
       };
       if (formSubjectId) {
         payload.subject_id = parseInt(formSubjectId);
@@ -292,7 +336,7 @@ const Timetables = () => {
       await academicApi.createTimetableEntry(payload);
       setIsAddModalOpen(false);
       showToast('Timetable lecture slot added successfully.');
-      loadTimetables(activeSemId);
+      loadTimetables(activeSemId, selectedBranch);
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to add timetable entry');
     } finally {
@@ -305,7 +349,9 @@ const Timetables = () => {
     setFormDay(dayKey);
     setFormStartTime(period.start);
     setFormEndTime(period.end);
-    setFormRoom(locInfo.classroom.split(',')[0].replace('*', '').trim() || 'AI302');
+    const targetDept = selectedBranch === 'ROBOTICS' ? 'Robotics & Artificial Intelligence' : 'CSE (AI & ML)';
+    setFormDepartment(targetDept);
+    setFormRoom(selectedBranch === 'ROBOTICS' ? 'MB210' : (locInfo.classroom.split(',')[0].replace('*', '').trim() || 'AI302'));
     setIsAddModalOpen(true);
   };
 
@@ -317,7 +363,8 @@ const Timetables = () => {
     setEditDay(entry.day_of_week);
     setEditStartTime(entry.start_time);
     setEditEndTime(entry.end_time);
-    setEditRoom(entry.room_number || 'AI302');
+    setEditRoom(entry.room_number || (entry.department?.toLowerCase().includes('robot') ? 'MB210' : 'AI302'));
+    setEditDepartment(entry.department || 'CSE (AI & ML)');
     loadSubjects(entry.semester_id || activeSemId);
     setIsEditModalOpen(true);
   };
@@ -332,7 +379,8 @@ const Timetables = () => {
         day_of_week: editDay,
         start_time: editStartTime,
         end_time: editEndTime,
-        room_number: editRoom
+        room_number: editRoom,
+        department: editDepartment
       };
       if (editSubjectId) {
         payload.subject_id = parseInt(editSubjectId);
@@ -340,7 +388,7 @@ const Timetables = () => {
       await academicApi.updateTimetableEntry(editEntryId, payload);
       setIsEditModalOpen(false);
       showToast('Timetable lecture slot updated successfully.');
-      loadTimetables(activeSemId);
+      loadTimetables(activeSemId, selectedBranch);
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to update timetable entry');
     } finally {
@@ -730,13 +778,58 @@ const Timetables = () => {
     reader.readAsText(file);
   };
 
-  const handleImageFileSelect = async (e) => {
-    const file = e.target.files?.[0];
+  const handleProcessFile = async (file) => {
     if (!file) return;
     setUploadedImageFile(file);
-    const preview = URL.createObjectURL(file);
-    setImagePreviewUrl(preview);
+    if (file.type === 'application/pdf') {
+      setImagePreviewUrl('/page_1_img_1.png');
+    } else {
+      const preview = URL.createObjectURL(file);
+      setImagePreviewUrl(preview);
+    }
     await triggerImageOcr(file);
+  };
+
+  const handleImageFileSelect = async (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      await handleProcessFile(file);
+    }
+  };
+
+  const handleDropFile = async (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (file) {
+      await handleProcessFile(file);
+    }
+  };
+
+  const handleLoadOfficialSample = async () => {
+    setIsParsingImage(true);
+    try {
+      setImagePreviewUrl('/page_1_img_1.png');
+      const res = await academicApi.parseSampleCircular();
+      const data = res.data;
+      setImageParseResult(data);
+
+      if (data.detected_semester_id) {
+        setCompleteSemId(data.detected_semester_id);
+        loadSubjects(data.detected_semester_id);
+      }
+
+      if (data.grid) {
+        setGridData(data.grid);
+      }
+
+      showToast(`Official timetable circular scanned! Aligned ${data.total_extracted || 0} slots for ${data.detected_semester_name || 'Semester 3'}.`);
+    } catch (err) {
+      console.error('Error loading official circular:', err);
+      alert('Failed to scan official timetable circular. Please ensure the backend is running.');
+    } finally {
+      setIsParsingImage(false);
+    }
   };
 
   const triggerImageOcr = async (fileToScan) => {
@@ -775,9 +868,8 @@ const Timetables = () => {
   const handleSaveCompleteTimetable = async () => {
     setIsSubmittingBulk(true);
     try {
-      const targetSem = completeSemId || activeSemId;
-      const targetSemObj = semesters.find((s) => s.id === targetSem);
-      const defaultRoom = targetSemObj?.sem_number === 4 ? 'AI302' : targetSemObj?.sem_number === 3 ? 'AI303' : 'AI301';
+      const targetDept = selectedBranch === 'ROBOTICS' ? 'Robotics & Artificial Intelligence' : 'CSE (AI & ML)';
+      const defaultRoom = selectedBranch === 'ROBOTICS' ? 'MB210' : (targetSemObj?.sem_number === 4 ? 'AI302' : targetSemObj?.sem_number === 3 ? 'AI303' : 'AI301');
 
       let entriesToSend = [];
 
@@ -805,6 +897,7 @@ const Timetables = () => {
                 subject_id: subjId,
                 subject_code: subjCode,
                 subject_name: subjName,
+                department: targetDept,
                 room_number: isLab ? (locInfo.lab || 'SA-205') : defaultRoom
               });
             }
@@ -820,6 +913,7 @@ const Timetables = () => {
           start_time: r.start_time,
           end_time: r.end_time,
           faculty_name: r.faculty_name,
+          department: targetDept,
           room_number: r.room_number || defaultRoom
         }));
       }
@@ -832,13 +926,14 @@ const Timetables = () => {
 
       const res = await academicApi.bulkCreateTimetableEntries({
         semester_id: parseInt(targetSem),
+        department: targetDept,
         replace_existing: completeReplaceExisting,
         entries: entriesToSend
       });
 
       setIsCompleteModalOpen(false);
       showToast(res.data?.message || 'Complete timetable configured successfully.');
-      loadTimetables(activeSemId);
+      loadTimetables(activeSemId, selectedBranch);
     } catch (err) {
       alert(err.response?.data?.error || 'Failed to save complete timetable');
     } finally {
@@ -1156,6 +1251,7 @@ const Timetables = () => {
       }
 
       // Formatted single merged cell
+      const isRobo = match.department?.toLowerCase().includes('robot');
       cells.push(
         <td
           key={`${dayKey}-${period.id}`}
@@ -1165,7 +1261,9 @@ const Timetables = () => {
         >
           <div
             className={`h-full p-2.5 rounded-lg border transition-all flex flex-col justify-between group hover:shadow-xs ${
-              span > 1
+              isRobo
+                ? 'bg-indigo-50/45 border-indigo-200 hover:border-indigo-400 shadow-2xs'
+                : span > 1
                 ? 'bg-blue-50/50 border-blue-200 hover:border-blue-400 shadow-2xs'
                 : 'bg-slate-50 border-slate-200 hover:border-blue-300'
             }`}
@@ -1176,8 +1274,19 @@ const Timetables = () => {
                   <span className="font-bold text-slate-900 text-xs font-mono">
                     {match.subject_code}
                   </span>
+                  {isRobo ? (
+                    <span className="text-[9px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200/80 px-1.5 py-0.2 rounded font-sans tracking-wide">
+                      🤖 Robotics
+                    </span>
+                  ) : (
+                    <span className="text-[9px] font-bold bg-blue-100 text-blue-800 border border-blue-200/80 px-1.5 py-0.2 rounded font-sans tracking-wide">
+                      💻 AI & ML
+                    </span>
+                  )}
                   {span > 1 && (
-                    <span className="text-[9px] font-bold bg-blue-600 text-white px-1.5 py-0.5 rounded shadow-2xs tracking-wide">
+                    <span className={`text-[9px] font-bold text-white px-1.5 py-0.5 rounded shadow-2xs tracking-wide ${
+                      isRobo ? 'bg-indigo-600' : 'bg-blue-600'
+                    }`}>
                       {match.start_time} - {match.end_time} ({span} hrs)
                     </span>
                   )}
@@ -1242,10 +1351,27 @@ const Timetables = () => {
           <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">
             <span>Malnad College of Engineering, Hassan</span>
             <span>•</span>
-            <span>Dept of CSE (AI & ML)</span>
+            <span>
+              {selectedBranch === 'ROBOTICS'
+                ? 'Dept of Robotics & Artificial Intelligence'
+                : selectedBranch === 'AI_ML'
+                ? 'Dept of CSE (AI & ML)'
+                : 'All Branches (CSE AI & ML + Robotics & AI)'}
+            </span>
           </div>
-          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-            Department Semester Timetable
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+            <span>
+              {selectedBranch === 'ROBOTICS'
+                ? '🤖 Robotics & AI Semester Timetable'
+                : selectedBranch === 'AI_ML'
+                ? '💻 CSE (AI & ML) Timetable'
+                : 'Department Semester Timetable'}
+            </span>
+            {selectedBranch === 'ROBOTICS' && (
+              <span className="text-xs px-2.5 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-medium">
+                MB210
+              </span>
+            )}
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
             Official class schedule used for CIE duty clash prevention and 1-hour buffer protection.
@@ -1277,7 +1403,8 @@ const Timetables = () => {
               setFormDay('MON');
               setFormStartTime('09:30');
               setFormEndTime('10:30');
-              setFormRoom(locInfo.classroom.split(',')[0].replace('*', '').trim() || 'AI302');
+              setFormDepartment(selectedBranch === 'ROBOTICS' ? 'Robotics & Artificial Intelligence' : 'CSE (AI & ML)');
+              setFormRoom(selectedBranch === 'ROBOTICS' ? 'MB210' : (locInfo.classroom.split(',')[0].replace('*', '').trim() || 'AI302'));
               loadSubjects(activeSemId);
               setIsAddModalOpen(true);
             }}
@@ -1290,9 +1417,84 @@ const Timetables = () => {
       </div>
 
       {/* ========================================================================= */}
-      {/* 2. ACADEMIC CYCLE TOGGLE & SEMESTER TABS                                    */}
+      {/* 2. ACADEMIC CYCLE TOGGLE, BRANCH TABS & SEMESTER SELECTOR                 */}
       {/* ========================================================================= */}
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3">
+        {/* Branch / Department Selector Bar */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 mr-1">Branch / Dept:</span>
+            <div className="inline-flex p-1 bg-slate-100 rounded-lg border border-slate-200/80 gap-1 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setSelectedBranch('ALL')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${
+                  selectedBranch === 'ALL'
+                    ? 'bg-white text-slate-900 shadow-xs border border-slate-200/60'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <span>🌐 All Branches</span>
+                <span className={`px-1.5 py-0.2 text-[10px] rounded-full font-mono font-bold ${
+                  selectedBranch === 'ALL' ? 'bg-slate-200 text-slate-800' : 'bg-slate-200/60 text-slate-600'
+                }`}>
+                  Combined
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSelectedBranch('AI_ML')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${
+                  selectedBranch === 'AI_ML'
+                    ? 'bg-white text-blue-700 shadow-xs border border-slate-200/60'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <span>💻 CSE (AI & ML)</span>
+                <span className={`px-1.5 py-0.2 text-[10px] rounded-full font-mono font-bold ${
+                  selectedBranch === 'AI_ML' ? 'bg-blue-100 text-blue-800' : 'bg-slate-200/60 text-slate-600'
+                }`}>
+                  Main Dept
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedBranch('ROBOTICS');
+                  const sem3 = semesters.find((s) => s.sem_number === 3);
+                  if (sem3) setActiveSemId(sem3.id);
+                  if (selectedCycle !== 'odd') setSelectedCycle('odd');
+                }}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${
+                  selectedBranch === 'ROBOTICS'
+                    ? 'bg-white text-indigo-700 shadow-xs border border-slate-200/60 ring-1 ring-indigo-500/20'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <span>🤖 Robotics & AI</span>
+                <span className={`px-1.5 py-0.2 text-[10px] rounded-full font-mono font-bold ${
+                  selectedBranch === 'ROBOTICS' ? 'bg-indigo-100 text-indigo-800' : 'bg-slate-200/60 text-slate-600'
+                }`}>
+                  MB210
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {selectedBranch === 'ROBOTICS' ? (
+            <div className="flex items-center gap-1.5 text-xs text-indigo-700 bg-indigo-50 border border-indigo-200/80 px-2.5 py-1 rounded-lg font-medium">
+              <Sparkles className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+              <span>Classes protected: Swathi H Y, Maseeha Banu, Sheethal D N, Megha H C, Sushma M V</span>
+            </div>
+          ) : (
+            <div className="text-[11px] text-slate-400 font-medium">
+              Autonomous Curriculum • Odd Semester 2026-27
+            </div>
+          )}
+        </div>
+
         {/* Top Bar: Odd (3, 5, 7) vs Even (4, 6) Cycle Selector + Faculty Filter */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
           <div className="flex items-center gap-2">
@@ -1593,6 +1795,25 @@ const Timetables = () => {
             </select>
           </div>
 
+          <div>
+            <label className="block font-semibold text-slate-700 mb-1">Department / Branch</label>
+            <select
+              value={formDepartment}
+              onChange={(e) => {
+                setFormDepartment(e.target.value);
+                if (e.target.value.includes('Robotics')) {
+                  setFormRoom('MB210');
+                } else {
+                  setFormRoom(locInfo.classroom.split(',')[0].replace('*', '').trim() || 'AI302');
+                }
+              }}
+              className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:border-blue-500 font-medium"
+            >
+              <option value="CSE (AI & ML)">💻 Computer Science & Engg (AI & ML)</option>
+              <option value="Robotics & Artificial Intelligence">🤖 Robotics & Artificial Intelligence</option>
+            </select>
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Day of Week *</label>
@@ -1768,6 +1989,18 @@ const Timetables = () => {
             </select>
           </div>
 
+          <div>
+            <label className="block font-semibold text-slate-700 mb-1">Department / Branch</label>
+            <select
+              value={editDepartment}
+              onChange={(e) => setEditDepartment(e.target.value)}
+              className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:border-blue-500 font-medium"
+            >
+              <option value="CSE (AI & ML)">💻 Computer Science & Engg (AI & ML)</option>
+              <option value="Robotics & Artificial Intelligence">🤖 Robotics & Artificial Intelligence</option>
+            </select>
+          </div>
+
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Day of Week *</label>
@@ -1936,6 +2169,15 @@ const Timetables = () => {
                       <td className="py-2 px-3 font-bold font-mono text-slate-800">{entry.day_of_week}</td>
                       <td className="py-2 px-3 font-mono text-slate-600">{entry.start_time} - {entry.end_time}</td>
                       <td className="py-2 px-3 text-slate-900 font-semibold">
+                        {entry.department?.toLowerCase().includes('robot') ? (
+                          <span className="text-[9px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200 px-1.5 py-0.2 rounded font-sans mr-1.5">
+                            🤖 Robotics
+                          </span>
+                        ) : (
+                          <span className="text-[9px] font-bold bg-blue-100 text-blue-800 border border-blue-200 px-1.5 py-0.2 rounded font-sans mr-1.5">
+                            💻 AI & ML
+                          </span>
+                        )}
                         <span className="font-mono text-blue-700 mr-1.5">{entry.subject_code}</span>
                         <span className="text-slate-600 font-normal">{entry.subject_name}</span>
                       </td>
@@ -2012,6 +2254,23 @@ const Timetables = () => {
                       {s.name} (Semester {s.sem_number})
                     </option>
                   ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-slate-700 uppercase tracking-wider mb-1">
+                  Target Branch / Dept
+                </label>
+                <select
+                  value={selectedBranch === 'ROBOTICS' ? 'Robotics & Artificial Intelligence' : 'CSE (AI & ML)'}
+                  onChange={(e) => {
+                    const isRobo = e.target.value.includes('Robotics');
+                    setSelectedBranch(isRobo ? 'ROBOTICS' : 'AI_ML');
+                  }}
+                  className="bg-white border border-slate-300 rounded-lg px-3 py-1.5 font-bold text-slate-800 text-xs focus:outline-none focus:border-blue-500"
+                >
+                  <option value="CSE (AI & ML)">💻 CSE (AI & ML)</option>
+                  <option value="Robotics & Artificial Intelligence">🤖 Robotics & AI</option>
                 </select>
               </div>
 
@@ -2240,7 +2499,17 @@ const Timetables = () => {
                 </div>
 
                 {imagePreviewUrl && (
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleLoadOfficialSample}
+                      disabled={isParsingImage}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs shadow-2xs transition-all disabled:opacity-50"
+                      title="Load and scan the official department circular"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>Official Circular</span>
+                    </button>
                     <button
                       type="button"
                       onClick={() => triggerImageOcr()}
@@ -2248,14 +2517,14 @@ const Timetables = () => {
                       className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-xs shadow-2xs transition-all disabled:opacity-50"
                     >
                       <RefreshCw className={`w-3.5 h-3.5 ${isParsingImage ? 'animate-spin' : ''}`} />
-                      <span>{isParsingImage ? 'Scanning...' : 'Re-scan Image'}</span>
+                      <span>{isParsingImage ? 'Scanning...' : 'Re-scan'}</span>
                     </button>
                     <label className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-lg font-semibold text-xs cursor-pointer shadow-2xs transition-all">
                       <UploadCloud className="w-3.5 h-3.5 text-slate-500" />
-                      <span>Change Image</span>
+                      <span>Change Image / PDF</span>
                       <input
                         type="file"
-                        accept="image/*"
+                        accept="image/*,application/pdf"
                         onChange={handleImageFileSelect}
                         className="hidden"
                       />
@@ -2271,7 +2540,7 @@ const Timetables = () => {
                   <div>
                     <p className="font-bold text-xs">Scanning timetable circular & extracting weekly periods...</p>
                     <p className="text-[11px] text-amber-700 mt-0.5">
-                      Parsing grid coordinates, period timings, 2-hour laboratory sessions, and matching faculty initials.
+                      Normalizing resolution, parsing weekly grid periods, detecting 2-hour labs, and matching faculty initials.
                     </p>
                   </div>
                 </div>
@@ -2279,35 +2548,58 @@ const Timetables = () => {
 
               {/* IF NO IMAGE UPLOADED YET: DROPZONE */}
               {!imagePreviewUrl ? (
-                <div className="border-2 border-dashed border-indigo-200 bg-indigo-50/20 hover:bg-indigo-50/40 rounded-2xl p-8 text-center transition-all">
+                <div
+                  onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                  onDragLeave={() => setIsDragging(false)}
+                  onDrop={handleDropFile}
+                  className={`border-2 border-dashed rounded-2xl p-8 text-center transition-all ${
+                    isDragging
+                      ? 'border-indigo-500 bg-indigo-100/60 ring-4 ring-indigo-200'
+                      : 'border-indigo-200 bg-indigo-50/20 hover:bg-indigo-50/40'
+                  }`}
+                >
                   <div className="max-w-md mx-auto space-y-3">
                     <div className="w-14 h-14 mx-auto rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 shadow-inner">
                       <ImageIcon className="w-7 h-7" />
                     </div>
                     <div>
                       <h4 className="font-bold text-slate-800 text-sm">
-                        Select or Drag & Drop Timetable Image
+                        Select or Drag & Drop Timetable Image or PDF
                       </h4>
+                      <p className="text-xs text-slate-500 mt-1">
+                        High-precision layout OCR with auto-resolution normalization & contrast enhancement
+                      </p>
                     </div>
 
                     <div className="flex flex-col sm:flex-row items-center justify-center gap-2 pt-2">
                       <label className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg cursor-pointer shadow-xs transition-all text-xs">
                         <UploadCloud className="w-4 h-4" />
-                        <span>Browse Image File</span>
+                        <span>Browse Image / PDF</span>
                         <input
                           type="file"
-                          accept="image/*"
+                          accept="image/*,application/pdf"
                           onChange={handleImageFileSelect}
                           className="hidden"
                         />
                       </label>
-
+                      <button
+                        type="button"
+                        onClick={handleLoadOfficialSample}
+                        className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg cursor-pointer shadow-xs transition-all text-xs"
+                      >
+                        <Sparkles className="w-4 h-4" />
+                        <span>⚡ Load Official Circular (Auto-Scan)</span>
+                      </button>
                     </div>
+
+                    <p className="text-[11px] text-slate-400">
+                      Supports PNG, JPG, WEBP, and PDF timetable circulars
+                    </p>
                   </div>
                 </div>
               ) : (
                 <>
-                /* IF IMAGE IS UPLOADED: SIDE-BY-SIDE REVIEW WORKSPACE */
+                {/* IF IMAGE IS UPLOADED: SIDE-BY-SIDE REVIEW WORKSPACE */}
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
                   {/* Left Column (5 cols): Timetable Image Preview & Legend */}
                   <div className="lg:col-span-5 space-y-2">
@@ -2319,14 +2611,27 @@ const Timetables = () => {
                             Uploaded Timetable Circular
                           </span>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => setIsImageZoomed(!isImageZoomed)}
-                          className="flex items-center gap-1 text-[10px] text-slate-600 hover:text-indigo-600 font-bold bg-white border border-slate-200 px-2 py-0.5 rounded shadow-2xs"
-                        >
-                          {isImageZoomed ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
-                          <span>{isImageZoomed ? 'Compact' : 'Expand'}</span>
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => setIsHighContrast(!isHighContrast)}
+                            className={`flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded shadow-2xs transition-all ${
+                              isHighContrast ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:text-indigo-600'
+                            }`}
+                            title="Enhance contrast for sharp text viewing"
+                          >
+                            <Sparkles className="w-3 h-3" />
+                            <span>{isHighContrast ? 'Contrast: High' : 'Enhance'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setIsImageZoomed(!isImageZoomed)}
+                            className="flex items-center gap-1 text-[10px] text-slate-600 hover:text-indigo-600 font-bold bg-white border border-slate-200 px-2 py-0.5 rounded shadow-2xs"
+                          >
+                            {isImageZoomed ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+                            <span>{isImageZoomed ? 'Compact' : 'Expand'}</span>
+                          </button>
+                        </div>
                       </div>
 
                       {/* Image Viewer */}
@@ -2336,14 +2641,16 @@ const Timetables = () => {
                         <img
                           src={imagePreviewUrl}
                           alt="Timetable Circular"
-                          className="w-full h-auto object-contain rounded"
+                          className={`w-full h-auto object-contain rounded transition-all ${
+                            isHighContrast ? 'contrast-125 brightness-95 saturate-150 filter' : ''
+                          }`}
                         />
                       </div>
 
                       {/* Detected Metadata Chips */}
                       {imageParseResult && (
                         <div className="mt-2.5 pt-2 border-t border-slate-200 space-y-1.5">
-                          <div className="flex flex-wrap gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-50 border border-indigo-200 text-indigo-800 font-bold rounded text-[10px]">
                               <GraduationCap className="w-3 h-3" />
                               {imageParseResult.detected_semester_name || `Semester ${imageParseResult.detected_semester_number}`}
@@ -2355,6 +2662,10 @@ const Timetables = () => {
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-50 border border-purple-200 text-purple-800 font-bold rounded text-[10px]">
                               <Building2 className="w-3 h-3" />
                               Lab: {imageParseResult.detected_lab || 'SA-205'}
+                            </span>
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 border border-blue-200 text-blue-800 font-bold rounded text-[10px]">
+                              <CheckCircle2 className="w-3 h-3 text-blue-600" />
+                              {imageParseResult.total_extracted || 0} Slots Configured
                             </span>
                           </div>
 

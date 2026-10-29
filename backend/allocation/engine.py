@@ -6,6 +6,22 @@ from models import (
 )
 from .optimizer import AllocationOptimizer
 
+def is_one_credit_session(sess):
+    sub = sess.subject
+    if not sub:
+        return False
+    code = (sub.code or '').upper().strip()
+    name = (sub.name or '').upper().strip()
+    one_credit_codes = ['EVS', 'CIP', 'UHV', 'SCR', 'NYP', 'BCM']
+    if any(k in code for k in one_credit_codes):
+        return True
+    if any(k in name for k in ['ENVIRONMENTAL', 'CONSTITUTION', 'HUMAN VALUES', 'SOCIAL CONNECT', 'COMMUNITY PROJECT', 'BRIDGE MATHEMATICS']):
+        return True
+    credits_val = getattr(sub, 'credits', None)
+    if credits_val in (1, '1', 1.0):
+        return True
+    return False
+
 class AllocationEngine:
     """
     High-level service coordinating the full allocation generation pipeline.
@@ -17,7 +33,7 @@ class AllocationEngine:
         return int(setting.value) if setting and setting.value.isdigit() else 60
 
     @classmethod
-    def get_pre_allocation_audit(cls, cie_id, semester_id=None, semester_ids=None):
+    def get_pre_allocation_audit(cls, cie_id, semester_id=None, semester_ids=None, include_one_credit=False, include_squad=False):
         """
         Gathers diagnostic statistics before running allocation:
         - CIE info
@@ -40,7 +56,14 @@ class AllocationEngine:
             query = query.filter(ExamSession.semester_id.in_(target_sem_ids))
 
         sessions = query.all()
-        total_required = sum((len(s.exam_rooms) if s.exam_rooms else s.required_invigilators) + (s.required_squad or 0) for s in sessions)
+        # Strictly exclude 1-credit subjects unless user explicitly selects include_one_credit
+        if not include_one_credit:
+            sessions = [s for s in sessions if not is_one_credit_session(s)]
+
+        total_required = sum(
+            (len(s.exam_rooms) if s.exam_rooms else s.required_invigilators) + ((s.required_squad or 0) if include_squad else 0)
+            for s in sessions
+        )
         all_faculty = Faculty.query.all()
         active_faculty = [f for f in all_faculty if f.is_active]
         eligible_faculty = [f for f in active_faculty if f.eligible_for_duty]
@@ -75,14 +98,19 @@ class AllocationEngine:
             'eligible_faculty_count': len(eligible_faculty),
             'excluded_faculty_count': len(excluded_faculty),
             'excluded_faculty_names': [f.name for f in excluded_faculty],
-            'buffer_minutes': cls.get_system_buffer_minutes()
+            'buffer_minutes': cls.get_system_buffer_minutes(),
+            'include_one_credit': include_one_credit,
+            'include_squad': include_squad
         }
 
     @classmethod
-    def generate_cie_allocation(cls, cie_id, user_identifier="Admin", semester_id=None, semester_ids=None):
+    def generate_cie_allocation(cls, cie_id, user_identifier="Admin", semester_id=None, semester_ids=None, include_one_credit=False, include_squad=False):
         """
         Executes end-to-end allocation generation for a given CIE.
         Supports optional semester_id or semester_ids to allocate for specific semesters without interrupting other semesters.
+        CRITICAL USER RULES:
+        - Never allocate 1-credit subjects unless include_one_credit is True.
+        - Never allocate squad duty unless include_squad is True.
         """
         cie = CIE.query.get(cie_id)
         if not cie:
@@ -98,9 +126,22 @@ class AllocationEngine:
         if target_sem_ids:
             query = query.filter(ExamSession.semester_id.in_(target_sem_ids))
 
-        exam_sessions = query.order_by(
+        raw_exam_sessions = query.order_by(
             ExamSession.exam_date, ExamSession.start_time
         ).all()
+
+        # Filter out 1-credit courses unless user explicitly opted in
+        if not include_one_credit:
+            exam_sessions = [s for s in raw_exam_sessions if not is_one_credit_session(s)]
+            # Also clean any old duties for excluded 1-credit subjects in this target set
+            excluded_1cr_ids = [s.id for s in raw_exam_sessions if is_one_credit_session(s)]
+            if excluded_1cr_ids:
+                old_1cr_duties = Duty.query.filter(Duty.exam_session_id.in_(excluded_1cr_ids)).all()
+                for od in old_1cr_duties:
+                    db.session.delete(od)
+                db.session.commit()
+        else:
+            exam_sessions = raw_exam_sessions
 
         if not exam_sessions:
             target_desc = f"Semesters {target_sem_ids}" if target_sem_ids else "any semester"
@@ -137,13 +178,18 @@ class AllocationEngine:
             AllocationExplanation.query.filter(AllocationExplanation.duty_id.in_(existing_duty_ids)).delete(synchronize_session=False)
         for d in existing_duties:
             db.session.delete(d)
-        db.session.flush()
+        db.session.commit()
+        db.session.expire_all()
 
         # Clean any orphaned explanations
         valid_duty_ids = [d.id for d in Duty.query.all()]
         if valid_duty_ids:
             AllocationExplanation.query.filter(~AllocationExplanation.duty_id.in_(valid_duty_ids)).delete(synchronize_session=False)
-        db.session.flush()
+            db.session.commit()
+            db.session.expire_all()
+
+        # Refresh all_faculty cleanly after commit
+        all_faculty = Faculty.query.all()
 
         # Execute optimization engine
         result = AllocationOptimizer.run_optimization(
@@ -151,7 +197,8 @@ class AllocationEngine:
             exam_sessions=exam_sessions,
             all_faculty=all_faculty,
             all_semesters=all_semesters,
-            buffer_minutes=buffer_minutes
+            buffer_minutes=buffer_minutes,
+            include_squad=include_squad
         )
 
         # Persist new duties and explanations

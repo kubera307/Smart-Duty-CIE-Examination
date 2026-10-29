@@ -656,16 +656,8 @@ def setup_all_semesters_sessions(cie_id):
         if 4 in sem_map and '24AI408' in sub4:   master_plan.append((4, sub4['24AI408'], day3, s4_a_st, s4_a_et))
         if 5 in sem_map and '24AI508' in sub5:   master_plan.append((5, sub5['24AI508'], day3, s5_a_st, s5_a_et))
 
-        # 5th Semester EVS examination rule:
-        # In CIE-II and CIE-III, 5th semester students have an additional examination for 24EVS (Environmental Studies).
-        is_cie2_or_3 = ('II' in (cie.name or '') or 'III' in (cie.name or '') or '2' in (cie.name or '') or '3' in (cie.name or ''))
-        if is_cie2_or_3 and 5 in sem_map and '24EVS' in sub5:
-            # Avoid duplicate if user also explicitly selected 24EVS in one_credit_subjects
-            evs_already_added = any(int(oc.get('subject_id', 0)) == sub5['24EVS'].id for oc in (data.get('one_credit_subjects') or []))
-            if not evs_already_added:
-                master_plan.append((5, sub5['24EVS'], day3, '15:30', '16:30'))
-
-        # Process any optional 1-credit subjects added by admin at the bottom of the modal:
+        # 1-credit subjects (e.g. 24EVS, 24CIP409, 24UHV, etc.) are ONLY included if explicitly selected by the admin
+        # Process any optional 1-credit subjects added by admin:
         one_credit_list = data.get('one_credit_subjects') or data.get('one_credit_sessions') or []
         for oc in one_credit_list:
             try:

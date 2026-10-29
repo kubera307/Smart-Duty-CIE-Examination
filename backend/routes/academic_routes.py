@@ -1,4 +1,5 @@
-from flask import Blueprint, request, jsonify
+import os
+from flask import Blueprint, request, jsonify, send_file
 from models import db, Semester, Subject, TimetableEntry, Faculty, AuditLog
 
 academic_bp = Blueprint('academic_bp', __name__)
@@ -53,6 +54,7 @@ def get_timetables():
     semester_id = request.args.get('semester_id')
     faculty_id = request.args.get('faculty_id')
     day = request.args.get('day_of_week')
+    department = request.args.get('department') or request.args.get('branch')
 
     query = TimetableEntry.query
 
@@ -62,6 +64,12 @@ def get_timetables():
         query = query.filter_by(faculty_id=int(faculty_id))
     if day:
         query = query.filter_by(day_of_week=day.strip().upper())
+    if department:
+        dept_str = department.strip().lower()
+        if 'robot' in dept_str:
+            query = query.filter(TimetableEntry.department.ilike('%robot%'))
+        elif 'cse' in dept_str or 'ai' in dept_str:
+            query = query.filter(~TimetableEntry.department.ilike('%robot%'))
 
     entries = query.order_by(TimetableEntry.start_time).all()
     day_order = {'MON': 0, 'TUE': 1, 'WED': 2, 'THU': 3, 'FRI': 4, 'SAT': 5}
@@ -79,6 +87,7 @@ def create_timetable_entry():
 
     sem_id = int(data['semester_id'])
     sub_id = data.get('subject_id')
+    target_dept = data.get('department') or data.get('branch') or 'CSE (AI & ML)'
     if not sub_id:
         sub = Subject.query.filter_by(semester_id=sem_id).first()
         if not sub:
@@ -86,7 +95,7 @@ def create_timetable_entry():
                 code=f"SEM{sem_id}-CLS",
                 name="Class Lecture",
                 semester_id=sem_id,
-                department='Computer Science & Engineering (AI & ML)'
+                department=target_dept
             )
             db.session.add(sub)
             db.session.flush()
@@ -101,7 +110,8 @@ def create_timetable_entry():
         day_of_week=data['day_of_week'].strip().upper(),
         start_time=data['start_time'].strip(),
         end_time=data['end_time'].strip(),
-        room_number=data.get('room_number', 'CR-301').strip()
+        room_number=data.get('room_number', 'CR-301').strip(),
+        department=target_dept
     )
     db.session.add(entry)
     db.session.flush()
@@ -205,8 +215,15 @@ def bulk_create_timetable_entries():
         return jsonify({'error': f'Semester with ID {semester_id} not found'}), 404
 
     try:
+        target_dept = data.get('department') or data.get('branch')
         if replace_existing:
-            TimetableEntry.query.filter_by(semester_id=sem.id).delete()
+            del_q = TimetableEntry.query.filter_by(semester_id=sem.id)
+            if target_dept:
+                if 'robot' in target_dept.lower():
+                    del_q = del_q.filter(TimetableEntry.department.ilike('%robot%'))
+                else:
+                    del_q = del_q.filter(~TimetableEntry.department.ilike('%robot%'))
+            del_q.delete(synchronize_session=False)
 
         created_entries = []
         all_faculties = Faculty.query.all()
@@ -218,6 +235,7 @@ def bulk_create_timetable_entries():
             start = (item.get('start_time') or '').strip()
             end = (item.get('end_time') or '').strip()
             room = (item.get('room_number') or 'AI302').strip()
+            item_dept = item.get('department') or item.get('branch') or target_dept or 'CSE (AI & ML)'
 
             if not day or not start or not end:
                 continue
@@ -237,7 +255,7 @@ def bulk_create_timetable_entries():
                         code=code,
                         name=subj_name,
                         semester_id=sem.id,
-                        department='Computer Science & Engineering (AI & ML)'
+                        department=item_dept
                     )
                     db.session.add(subject)
                     db.session.flush()
@@ -250,7 +268,7 @@ def bulk_create_timetable_entries():
                         code=f"SEM{sem.sem_number}-CLS",
                         name="Class Lecture",
                         semester_id=sem.id,
-                        department='Computer Science & Engineering (AI & ML)'
+                        department=item_dept
                     )
                     db.session.add(subject)
                     db.session.flush()
@@ -283,7 +301,8 @@ def bulk_create_timetable_entries():
                 day_of_week=day,
                 start_time=start,
                 end_time=end,
-                room_number=room
+                room_number=room,
+                department=item_dept
             )
             db.session.add(entry)
             created_entries.append(entry)
@@ -360,6 +379,54 @@ def parse_timetable_image():
 
     except Exception as e:
         return jsonify({'error': f'Failed to parse timetable image: {str(e)}'}), 500
+
+
+@academic_bp.route('/timetables/sample-circular', methods=['GET'])
+def get_sample_circular():
+    """Returns the official timetable circular image."""
+    candidates = [
+        os.path.join(os.path.dirname(__file__), '..', '..', 'tests', 'sample_outputs', 'page_1_img_1.png'),
+        os.path.join(os.path.dirname(__file__), '..', '..', 'frontend', 'public', 'page_1_img_1.png'),
+        os.path.join(os.path.dirname(__file__), '..', '..', 'page_1_img_1.png')
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return send_file(os.path.abspath(p), mimetype='image/png')
+    return jsonify({'error': 'Sample circular image not found'}), 404
+
+
+@academic_bp.route('/timetables/parse-sample', methods=['POST'])
+def parse_sample_circular():
+    """Automatically parses the official Malnad timetable circular and returns aligned grid slots."""
+    try:
+        from services.timetable_ocr_service import parse_timetable_from_image
+        candidates = [
+            os.path.join(os.path.dirname(__file__), '..', '..', 'tests', 'sample_outputs', 'page_1_img_1.png'),
+            os.path.join(os.path.dirname(__file__), '..', '..', 'frontend', 'public', 'page_1_img_1.png'),
+            os.path.join(os.path.dirname(__file__), '..', '..', 'page_1_img_1.png')
+        ]
+        img_bytes = None
+        for p in candidates:
+            if os.path.exists(p):
+                with open(p, 'rb') as f:
+                    img_bytes = f.read()
+                break
+
+        if not img_bytes:
+            return jsonify({'error': 'Sample circular image not found'}), 404
+
+        result = parse_timetable_from_image(img_bytes)
+        sem_num = result.get('detected_semester_number', 3)
+        target_sem = Semester.query.filter_by(sem_number=int(sem_num)).first() or Semester.query.first()
+
+        result['detected_semester_id'] = target_sem.id if target_sem else None
+        result['detected_semester_name'] = target_sem.name if target_sem else f"Semester {sem_num}"
+        result['detected_semester_number'] = target_sem.sem_number if target_sem else sem_num
+
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to parse sample circular: {str(e)}'}), 500
+
 
 
 

@@ -29,6 +29,10 @@ const GenerateAllocation = () => {
   const [preview, setPreview] = useState(null);
   const [loadingPreview, setLoadingPreview] = useState(true);
 
+  // Optional duty inclusion flags (Strictly opt-in: default false)
+  const [includeOneCredit, setIncludeOneCredit] = useState(false);
+  const [includeSquad, setIncludeSquad] = useState(false);
+
   // Faculty Duty Quotas & Seniority Protection
   const [quotaRawText, setQuotaRawText] = useState('swathi-1, ankitha-3, sushma-4, megha-4, maseeha-5, shithal-4');
   const [quotaMap, setQuotaMap] = useState({});
@@ -132,15 +136,18 @@ const GenerateAllocation = () => {
     if (selectedCieId) {
       const singleSem = selectedSemesterIds.length === 1 ? selectedSemesterIds[0] : null;
       const multiSems = selectedSemesterIds.length > 1 ? selectedSemesterIds : null;
-      loadPreview(selectedCieId, singleSem, multiSems);
+      loadPreview(selectedCieId, singleSem, multiSems, includeOneCredit, includeSquad);
     }
-  }, [selectedCieId, selectedSemesterIds]);
+  }, [selectedCieId, selectedSemesterIds, includeOneCredit, includeSquad]);
 
-  const loadPreview = async (cieId, semId = null, semIds = null) => {
+  const loadPreview = async (cieId, semId = null, semIds = null, oneCredit = includeOneCredit, squad = includeSquad) => {
     setLoadingPreview(true);
     setError(null);
     try {
-      const res = await allocationApi.getPreview(cieId, semId, semIds);
+      const res = await allocationApi.getPreview(cieId, semId, semIds, {
+        include_one_credit: oneCredit,
+        include_squad: squad,
+      });
       setPreview(res.data);
     } catch (err) {
       setError('Unable to load pre-allocation diagnostics.');
@@ -170,12 +177,15 @@ const GenerateAllocation = () => {
     try {
       const singleSem = selectedSemesterIds.length === 1 ? selectedSemesterIds[0] : null;
       const multiSems = selectedSemesterIds.length > 1 ? selectedSemesterIds : null;
-      const res = await allocationApi.generate(selectedCieId, singleSem, multiSems);
+      const res = await allocationApi.generate(selectedCieId, singleSem, multiSems, {
+        include_one_credit: includeOneCredit,
+        include_squad: includeSquad,
+      });
       clearInterval(stageInterval);
       setCurrentStage(6); // Complete
       setGenerationResult(res.data);
       // Reload preview to update counts
-      loadPreview(selectedCieId, singleSem, multiSems);
+      loadPreview(selectedCieId, singleSem, multiSems, includeOneCredit, includeSquad);
       loadDutyQuotas();
     } catch (err) {
       clearInterval(stageInterval);
@@ -343,6 +353,60 @@ const GenerateAllocation = () => {
             Automated <strong>60-minute pre- and post-lecture buffer protection</strong> is enforced across regular teaching slots.
           </div>
         </div>
+
+        {/* Optional Duty Scope Inclusions (Strictly Opt-in) */}
+        <div className="p-3.5 bg-slate-50/80 border border-slate-200/90 rounded-xl space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+              <Filter className="w-3.5 h-3.5 text-indigo-600" />
+              Optional Duty Inclusions (Strictly Opt-In):
+            </span>
+            <span className="text-[10px] text-slate-500 font-medium">Default: Unchecked (Quota strict matching)</span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* 1-Credit Subject Toggle */}
+            <label className={`flex items-start gap-2.5 p-2.5 rounded-xl border transition-all cursor-pointer ${
+              includeOneCredit ? 'bg-amber-50/80 border-amber-300 ring-1 ring-amber-200' : 'bg-white border-slate-200 hover:bg-slate-50'
+            }`}>
+              <input
+                type="checkbox"
+                checked={includeOneCredit}
+                onChange={(e) => setIncludeOneCredit(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-amber-600 focus:ring-amber-500 cursor-pointer"
+              />
+              <div className="text-xs select-none">
+                <div className="font-bold text-slate-800 flex items-center gap-1.5">
+                  <span>Include 1-Credit Subject(s)</span>
+                  <span className="text-[9px] px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded font-semibold">24EVS, CIP, etc.</span>
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5 leading-tight">
+                  Only allocate duties for 1-credit subjects if selected here. Otherwise excluded.
+                </div>
+              </div>
+            </label>
+
+            {/* Squad Duty Toggle */}
+            <label className={`flex items-start gap-2.5 p-2.5 rounded-xl border transition-all cursor-pointer ${
+              includeSquad ? 'bg-indigo-50/80 border-indigo-300 ring-1 ring-indigo-200' : 'bg-white border-slate-200 hover:bg-slate-50'
+            }`}>
+              <input
+                type="checkbox"
+                checked={includeSquad}
+                onChange={(e) => setIncludeSquad(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+              />
+              <div className="text-xs select-none">
+                <div className="font-bold text-slate-800 flex items-center gap-1.5">
+                  <span>Include Squad Duty</span>
+                  <span className="text-[9px] px-1.5 py-0.5 bg-indigo-100 text-indigo-800 rounded font-semibold">Roving Supervisory</span>
+                </div>
+                <div className="text-[11px] text-slate-500 mt-0.5 leading-tight">
+                  Only allocate flying squad duties if selected here. Otherwise excluded.
+                </div>
+              </div>
+            </label>
+          </div>
+        </div>
       </div>
 
       {/* Pre-Allocation Diagnostic Card */}
@@ -480,7 +544,7 @@ const GenerateAllocation = () => {
               })}
             </div>
             <div className="text-[10px] text-purple-900 font-semibold flex items-center justify-between pt-1 border-t border-purple-100">
-              <span>🛡️ Dr. Arjun B C (HOD): Squad Duty Only</span>
+              <span>🛡️ Dr. Arjun B C (HOD): Squad Duty Only ({includeSquad ? 'Included' : 'Excluded by default'})</span>
               <span>Configured Invigilation Quotas: <strong>{Object.entries(quotaMap).filter(([fid]) => parseInt(fid) !== 1).reduce((a, [, b]) => a + (parseInt(b) || 0), 0) || 21} Duties</strong></span>
             </div>
           </div>

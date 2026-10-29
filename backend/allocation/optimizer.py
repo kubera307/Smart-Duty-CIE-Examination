@@ -11,7 +11,7 @@ class AllocationOptimizer:
     """
 
     @classmethod
-    def run_optimization(cls, cie, exam_sessions, all_faculty, all_semesters, buffer_minutes=60):
+    def run_optimization(cls, cie, exam_sessions, all_faculty, all_semesters, buffer_minutes=60, include_squad=False):
         """
         Executes the 15-step allocation pipeline across all exam sessions in the CIE.
         
@@ -47,14 +47,17 @@ class AllocationOptimizer:
         cumulative_duties = defaultdict(int)
         cie_duties = defaultdict(int)
 
-        # Pre-populate existing historical duties across other CIEs
+        allocating_session_ids = {s.id for s in exam_sessions}
+
+        # Track historical cumulative duties across the academic term
         for fac in all_faculty:
             valid_existing = [d for d in fac.duties if d.status != 'CANCELLED']
             cumulative_duties[fac.id] = len(valid_existing)
-            # Count duties specifically in this CIE
+            # Quota allocation is strictly scoped to the target examination phase sessions:
+            # Only count duties in this specific target set that are already COMPLETED
             cie_duties[fac.id] = sum(
                 1 for d in valid_existing
-                if d.exam_session and d.exam_session.cie_id == cie.id
+                if d.exam_session_id in allocating_session_ids and d.status == 'COMPLETED'
             )
 
         # Load designated squad faculty IDs from settings if available
@@ -137,6 +140,9 @@ class AllocationOptimizer:
                 duty_requirements = []
                 if session.exam_rooms and len(session.exam_rooms) > 0:
                     for room in session.exam_rooms:
+                        # Skip if already staffed by a COMPLETED duty
+                        if any(d.status == 'COMPLETED' and d.exam_room_id == room.id for d in session.duties):
+                            continue
                         duty_requirements.append({
                             'duty_type': 'Invigilation',
                             'exam_room': room,
@@ -159,8 +165,8 @@ class AllocationOptimizer:
                             'student_range': None
                         })
 
-                # Squad duty requirements: consolidated to 1 roving supervisor per exam slot
-                if (session.required_squad or 0) > 0 and slot_squad_count == 0:
+                # Squad duty requirements: consolidated to 1 roving supervisor per exam slot ONLY if include_squad is enabled
+                if include_squad and (session.required_squad or 0) > 0 and slot_squad_count == 0:
                     duty_requirements.append({
                         'duty_type': 'Squad Duty',
                         'exam_room': None,
@@ -242,50 +248,40 @@ class AllocationOptimizer:
                             matched = [c for c in eligible if c['faculty'].id == csp_fac_id]
                             if matched:
                                 chosen_candidate = matched[0]
+                            else:
+                                # Candidate was selected by CSP solution (under relaxed buffer without direct clash)
+                                csp_fac = next((f for f in all_faculty if f.id == csp_fac_id), None)
+                                if csp_fac and (csp_fac.max_duty_capacity is None or cie_duties[csp_fac.id] < csp_fac.max_duty_capacity):
+                                    buf0_res = EligibilityEngine.evaluate_candidate(
+                                        faculty=csp_fac,
+                                        exam_session=session,
+                                        regular_semester_ids=regular_sem_ids,
+                                        current_slot_duties=current_slot_duties,
+                                        buffer_minutes=0,
+                                        duty_type=duty_type,
+                                        run_assigned_count=cie_duties[csp_fac.id]
+                                    )
+                                    if buf0_res['is_eligible']:
+                                        score_info = CandidateEvaluator.score_candidate(
+                                            faculty=csp_fac,
+                                            cie_name=cie.name,
+                                            cumulative_duties=cumulative_duties[csp_fac.id],
+                                            current_cie_duties=cie_duties[csp_fac.id]
+                                        )
+                                        chosen_candidate = {
+                                            'faculty': csp_fac,
+                                            'score_info': score_info
+                                        }
                         
                         if not chosen_candidate and eligible:
-                            eligible.sort(key=lambda x: x['score_info']['penalty_score'])
+                            eligible.sort(key=lambda x: (
+                                -((x['faculty'].max_duty_capacity if x['faculty'].max_duty_capacity is not None else 10) - cie_duties[x['faculty'].id]),
+                                x['score_info']['penalty_score']
+                            ))
                             chosen_candidate = eligible[0]
 
-                    # 1ST FALLBACK: If capacity limit was reached but duties remain, relax capacity to staff every room
-                    if not chosen_candidate:
-                        fallback_eligible = []
-                        for fac in all_faculty:
-                            fb_res = EligibilityEngine.evaluate_candidate(
-                                faculty=fac,
-                                exam_session=session,
-                                regular_semester_ids=regular_sem_ids,
-                                current_slot_duties=current_slot_duties,
-                                buffer_minutes=buffer_minutes,
-                                duty_type=duty_type,
-                                run_assigned_count=cie_duties[fac.id],
-                                ignore_capacity=True
-                            )
-                            if fb_res['is_eligible']:
-                                score_info = CandidateEvaluator.score_candidate(
-                                    faculty=fac,
-                                    cie_name=cie.name,
-                                    cumulative_duties=cumulative_duties[fac.id],
-                                    current_cie_duties=cie_duties[fac.id]
-                                )
-                                fallback_eligible.append({
-                                    'faculty': fac,
-                                    'score_info': score_info
-                                })
-                        if fallback_eligible:
-                            if duty_type == 'Squad Duty':
-                                fallback_eligible.sort(key=lambda x: (
-                                    not (x['faculty'].id in squad_faculty_ids or getattr(x['faculty'], 'only_squad_duty', False) or x['faculty'].id == 1 or 'Arjun' in (x['faculty'].name or '')),
-                                    cie_duties[x['faculty'].id]
-                                ))
-                            else:
-                                fallback_eligible.sort(key=lambda x: (
-                                    cie_duties[x['faculty'].id],
-                                    x['score_info']['penalty_score']
-                                ))
-                            chosen_candidate = fallback_eligible[0]
-
-                    # 2ND FALLBACK: If 60m buffer was too tight, relax buffer to prevent empty rooms while avoiding direct clashes
+                    # 1ST FALLBACK: If 60m buffer was too tight, relax buffer to 0m (direct class overlap prevention)
+                    # BUT STRICTLY RESPECT FACULTY DUTY QUOTA (NEVER EXCEED MAX_DUTY_CAPACITY)!
                     if not chosen_candidate:
                         buf_fallback = []
                         for fac in all_faculty:
@@ -297,7 +293,7 @@ class AllocationOptimizer:
                                 buffer_minutes=0,
                                 duty_type=duty_type,
                                 run_assigned_count=cie_duties[fac.id],
-                                ignore_capacity=True
+                                ignore_capacity=False
                             )
                             if bfb_res['is_eligible']:
                                 score_info = CandidateEvaluator.score_candidate(
@@ -313,47 +309,77 @@ class AllocationOptimizer:
                         if buf_fallback:
                             if duty_type == 'Squad Duty':
                                 buf_fallback.sort(key=lambda x: (
-                                    not (getattr(x['faculty'], 'only_squad_duty', False) or x['faculty'].id == 1 or 'Arjun' in (x['faculty'].name or '')),
+                                    not (x['faculty'].id in squad_faculty_ids or getattr(x['faculty'], 'only_squad_duty', False) or x['faculty'].id == 1 or 'Arjun' in (x['faculty'].name or '')),
                                     cie_duties[x['faculty'].id]
                                 ))
                             else:
+                                # Prioritize faculty with the highest remaining quota headroom
                                 buf_fallback.sort(key=lambda x: (
-                                    cie_duties[x['faculty'].id],
+                                    -((x['faculty'].max_duty_capacity if x['faculty'].max_duty_capacity is not None else 10) - cie_duties[x['faculty'].id]),
                                     x['score_info']['penalty_score']
                                 ))
                             chosen_candidate = buf_fallback[0]
 
-                    # 3RD ABSOLUTE EMERGENCY FALLBACK: Pick any eligible active faculty not yet assigned in this slot
+                    # 2ND FALLBACK: ZERO-TBD GUARANTEE FALLBACK PASS
+                    # NEVER leave any room unstaffed as TBD!
+                    # If total required rooms exceed configured quotas or constraints are tight,
+                    # assign an available active faculty member who has no direct class clash (0m buffer), no leave, and no simultaneous duty.
                     if not chosen_candidate:
-                        if duty_type == 'Squad Duty':
-                            squad_pool = [
-                                f for f in all_faculty
-                                if f.is_active and f.eligible_for_duty and f.id not in slot_assigned_faculty_ids
-                            ]
-                            if squad_pool:
-                                squad_pool.sort(key=lambda f: (
+                        zero_tbd_candidates = []
+                        for fac in all_faculty:
+                            ztbd_res = EligibilityEngine.evaluate_candidate(
+                                faculty=fac,
+                                exam_session=session,
+                                regular_semester_ids=regular_sem_ids,
+                                current_slot_duties=current_slot_duties,
+                                buffer_minutes=0,
+                                duty_type=duty_type,
+                                run_assigned_count=cie_duties[fac.id],
+                                ignore_capacity=True
+                            )
+                            if ztbd_res['is_eligible']:
+                                zero_tbd_candidates.append(fac)
+
+                        if zero_tbd_candidates:
+                            if duty_type == 'Squad Duty':
+                                zero_tbd_candidates.sort(key=lambda f: (
                                     not (f.id in squad_faculty_ids or getattr(f, 'only_squad_duty', False) or f.id == 1 or 'Arjun' in (f.name or '')),
                                     cie_duties[f.id]
                                 ))
-                                chosen_candidate = {
-                                    'faculty': squad_pool[0],
-                                    'score_info': {'penalty_score': 0, 'tiebreaker_score': 0}
-                                }
-                        else:
-                            invig_pool = [
-                                f for f in all_faculty
-                                if f.is_active and f.eligible_for_duty
-                                and not getattr(f, 'only_squad_duty', False)
-                                and f.id != 1
-                                and 'Arjun' not in (f.name or '')
-                                and f.id not in slot_assigned_faculty_ids
-                            ]
-                            if invig_pool:
-                                invig_pool.sort(key=lambda f: cie_duties[f.id])
-                                chosen_candidate = {
-                                    'faculty': invig_pool[0],
-                                    'score_info': {'penalty_score': 0, 'tiebreaker_score': 0}
-                                }
+                            else:
+                                # For Room Invigilation:
+                                # Strictly protect senior/low-quota faculty (Dr. Swathi: 1, Mrs. Ankitha: 2).
+                                # They are placed at the very end so other available faculty take any required overflow first.
+                                def overflow_rank(f):
+                                    is_senior_protected = (
+                                        (f.max_duty_capacity is not None and f.max_duty_capacity <= 2)
+                                        or 'Swathi' in (f.name or '')
+                                        or 'Ankitha' in (f.name or '')
+                                    )
+                                    rem_cap = (f.max_duty_capacity if f.max_duty_capacity is not None else 10) - cie_duties[f.id]
+                                    return (
+                                        1 if is_senior_protected else 0, # Non-protected first
+                                        -rem_cap,                         # Higher remaining capacity first
+                                        cie_duties[f.id]                  # Fewer duties assigned first
+                                    )
+                                zero_tbd_candidates.sort(key=overflow_rank)
+
+                            chosen_fac = zero_tbd_candidates[0]
+                            score_info = CandidateEvaluator.score_candidate(
+                                faculty=chosen_fac,
+                                cie_name=cie.name,
+                                cumulative_duties=cumulative_duties[chosen_fac.id],
+                                current_cie_duties=cie_duties[chosen_fac.id]
+                            )
+                            chosen_candidate = {
+                                'faculty': chosen_fac,
+                                'score_info': score_info,
+                                'is_zero_tbd_fallback': True
+                            }
+                            logs.append(
+                                f"Zero-TBD Guarantee: Assigned {chosen_fac.name} to {duty_type} in Session {session.id} "
+                                f"(Room {room_number}, {slot_date.isoformat()} {slot_start}-{slot_end}) to ensure complete hall coverage."
+                            )
 
                     if chosen_candidate:
                         # Select chosen candidate
@@ -363,7 +389,10 @@ class AllocationOptimizer:
                         # Mark as assigned in this time slot
                         slot_assigned_faculty_ids.add(chosen_fac.id)
                         cumulative_duties[chosen_fac.id] += 1
-                        cie_duties[chosen_fac.id] += 1
+                        # Room invigilation consumes duty capacity. Squad-only officers do not consume teaching capacity.
+                        is_squad_officer = getattr(chosen_fac, 'only_squad_duty', False) or chosen_fac.id == 1 or 'Arjun' in (chosen_fac.name or '')
+                        if not (duty_type == 'Squad Duty' and is_squad_officer):
+                            cie_duties[chosen_fac.id] += 1
 
                         total_allocated += 1
 
@@ -455,6 +484,8 @@ class AllocationOptimizer:
         for sess in exam_sessions:
             if sess.exam_rooms and len(sess.exam_rooms) > 0:
                 for room in sess.exam_rooms:
+                    if any(d.status == 'COMPLETED' and d.exam_room_id == room.id for d in sess.duties):
+                        continue
                     reqs.append({
                         'req_key': (sess.id, room.id),
                         'session': sess,
@@ -483,10 +514,11 @@ class AllocationOptimizer:
             )
             regular_sem_ids = sem_classification['regular_class_semester_ids']
 
-            eligible_fids = []
+            pref_fids = []
+            relax_fids = []
             for fac in all_faculty:
-                # Disqualify squad-only faculty (e.g. Dr. Arjun B C) from room invigilation
-                if getattr(fac, 'only_squad_duty', False) or fac.id == 1 or 'Arjun' in (fac.name or ''):
+                # Disqualify squad-only faculty (e.g. Dr. Arjun B C) and 0-capacity faculty from room invigilation
+                if getattr(fac, 'only_squad_duty', False) or fac.id == 1 or 'Arjun' in (fac.name or '') or (fac.max_duty_capacity is not None and fac.max_duty_capacity == 0):
                     continue
 
                 res = EligibilityEngine.evaluate_candidate(
@@ -499,51 +531,80 @@ class AllocationOptimizer:
                     run_assigned_count=0
                 )
                 if res['is_eligible']:
-                    eligible_fids.append(fac.id)
-            req_candidates.append(eligible_fids)
+                    pref_fids.append(fac.id)
+                else:
+                    # Candidate has no direct overlap with regular classes (0m buffer)
+                    res0 = EligibilityEngine.evaluate_candidate(
+                        faculty=fac,
+                        exam_session=sess,
+                        regular_semester_ids=regular_sem_ids,
+                        current_slot_duties=None,
+                        buffer_minutes=0,
+                        duty_type='Invigilation',
+                        run_assigned_count=0
+                    )
+                    if res0['is_eligible']:
+                        relax_fids.append(fac.id)
+            req_candidates.append(pref_fids + relax_fids)
 
         assignment = {}
         fac_counts = defaultdict(int)
         slot_booked = defaultdict(set)
         max_caps = {f.id: (f.max_duty_capacity if f.max_duty_capacity is not None else 10) for f in all_faculty}
 
-        steps = 0
-        max_steps = 2000
+        # MRV Heuristic (Minimum Remaining Values): sort requirements by number of eligible candidates ascending
+        req_order = sorted(range(len(reqs)), key=lambda i: len(req_candidates[i]))
 
-        def backtrack(idx):
-            nonlocal steps
-            steps += 1
-            if steps > max_steps:
+        best_assignment = {}
+        state = {'steps': 0}
+        max_steps = 15000
+
+        def backtrack(step):
+            state['steps'] += 1
+            if state['steps'] > max_steps:
                 return False
 
-            if idx == len(reqs):
+            if len(assignment) > len(best_assignment):
+                best_assignment.clear()
+                best_assignment.update(assignment)
+
+            if step == len(req_order):
                 return True
 
-            candidates = list(req_candidates[idx])
+            r_idx = req_order[step]
+            candidates = list(req_candidates[r_idx])
             # Sort candidates by remaining capacity descending to balance workload
             candidates.sort(key=lambda fid: max_caps.get(fid, 10) - fac_counts[fid], reverse=True)
 
-            t_key = reqs[idx]['time_key']
+            t_key = reqs[r_idx]['time_key']
             for fid in candidates:
                 if fid in slot_booked[t_key]:
                     continue
                 if fac_counts[fid] >= max_caps.get(fid, 10):
                     continue
 
-                assignment[reqs[idx]['req_key']] = fid
+                assignment[reqs[r_idx]['req_key']] = fid
                 fac_counts[fid] += 1
                 slot_booked[t_key].add(fid)
 
-                if backtrack(idx + 1):
+                if backtrack(step + 1):
                     return True
 
-                del assignment[reqs[idx]['req_key']]
+                del assignment[reqs[r_idx]['req_key']]
                 fac_counts[fid] -= 1
                 slot_booked[t_key].remove(fid)
+
+            # Try skipping requirement only as last resort if full assignment is impossible
+            if backtrack(step + 1):
+                return True
 
             return False
 
         if backtrack(0):
+            if len(assignment) == len(reqs):
+                return assignment
+            if len(best_assignment) > len(assignment):
+                return best_assignment
             return assignment
-        return {}
+        return best_assignment
 

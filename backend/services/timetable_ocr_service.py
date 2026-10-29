@@ -1,7 +1,7 @@
 import re
 import os
 import io
-from PIL import Image
+from PIL import Image, ImageOps, ImageEnhance
 from models import db, Faculty, Semester, Subject
 
 # Department Faculty & Extended Faculty Roster
@@ -12,10 +12,11 @@ INITIALS_TO_NAMES = {
     'ANS': 'Mrs. Ankitha S',
     'MHC': 'Mrs. Megha H C',
     'MB':  'Mrs. Maseeha Banu',
-    'SDN': 'Sheethal D N',
+    'SDN': 'Mrs. Sheethal D N',
     'AGN': 'Dr. Adithya G N',
     'SSG': 'Prof. S. S. Girish',
-    'AKP': 'Prof. A. K. Parvathi'
+    'AKP': 'Prof. A. K. Parvathi',
+    'MPJ': 'Mr. Manikantha Prasad J'
 }
 
 INITIALS_ALIASES = {
@@ -23,17 +24,67 @@ INITIALS_ALIASES = {
     'IVB': 'MB',
     'KITHAS': 'ANS',
     'ANKITHA': 'ANS',
-    'ARJUN': 'ABC'
+    'ARJUN': 'ABC',
+    'MPJ': 'MPJ',
+    'NWJ': 'MPJ',
+    'NQJ': 'MPJ',
+    'SSG': 'SSG',
+    'AKP': 'AKP',
+    'SHEETHAL': 'SDN',
+    'SHITHAL': 'SDN',
+    'SWATHI': 'HYS',
+    'SUSHMA': 'SMV',
+    'MEGHA': 'MHC'
 }
 
+# Canonical subjects with corrected names and credits
 KNOWN_SPECIAL_SUBJECTS = {
+    # 3rd Semester
+    '24MAAI301': {'name': 'Mathematics for AI&ML', 'ltp': '2-2-0', 'credits': '3', 'faculty': 'SSG'},
+    '24AI302': {'name': 'Digital Design and Computer Organization', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'MPJ'},
+    '24AI303': {'name': 'Operating Systems', 'ltp': '3-0-2', 'credits': '4', 'faculty': 'SDN'},
+    '24AI304': {'name': 'Data Structures and Applications', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'MB'},
+    '24AI305': {'name': 'Introduction to Artificial Intelligence', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'ABC'},
+    '24AI306A': {'name': 'Python for Data Science', 'ltp': '2-0-2', 'credits': '3', 'faculty': 'HYS'},
+    '24AI307A': {'name': 'Data Visualization using Tableau and Power BI', 'ltp': '0-0-2', 'credits': '1', 'faculty': 'ANS'},
+    '24AIL308': {'name': 'Data Structures Lab', 'ltp': '0-0-2', 'credits': '1', 'faculty': 'MB'},
+    '24SCR':  {'name': 'Social Connect and Responsibility', 'ltp': '0-0-2', 'credits': '1', 'faculty': 'MHC'},
     '24NYP1': {'name': 'NSS, YOGA, PE', 'ltp': '0-0-2', 'credits': 'Audit', 'faculty': 'ANS'},
-    '25NYP1': {'name': 'NSS, YOGA, PE', 'ltp': '0-0-2', 'credits': 'Audit', 'faculty': 'MB'},
     '24BCM':  {'name': 'Bridge Course Mathematics (MC for Diploma students)', 'ltp': '3-0-0', 'credits': 'Audit', 'faculty': 'AKP'},
     '25BCM301': {'name': 'Bridge Mathematics-I', 'ltp': '3-0-0', 'credits': 'Audit', 'faculty': 'AKP'},
-    '24SCR':  {'name': 'Social Connect and Responsibility', 'ltp': '0-0-2', 'credits': '1', 'faculty': 'MHC'},
-    '25SCR':  {'name': 'Community Project / Societal Project', 'ltp': '0-0-2', 'credits': '1', 'faculty': 'MHC'}
+    '25NYP1': {'name': 'NSS, YOGA, PE', 'ltp': '0-0-2', 'credits': 'Audit', 'faculty': 'MB'},
+    '25SCR':  {'name': 'Community Project / Societal Project', 'ltp': '0-0-2', 'credits': '1', 'faculty': 'MHC'},
+
+    # 5th Semester
+    '24AI501': {'name': 'Software Engineering & Project Management', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'ABC'},
+    '24AI502': {'name': 'Database Management Systems', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'ANS'},
+    '24AI503': {'name': 'Computer Networks', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'SDN'},
+    '24AI504': {'name': 'Deep Learning', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'HYS'},
+    '24AI505A': {'name': 'Computer Graphics and Image Processing', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'SMV'},
+    '24AIL506': {'name': 'DBMS and Networks Lab', 'ltp': '0-0-2', 'credits': '1', 'faculty': 'ANS'},
+    '24AIL507': {'name': 'Deep Learning Lab', 'ltp': '0-0-2', 'credits': '1', 'faculty': 'HYS'},
+
+    # 7th Semester
+    '23AI701': {'name': 'Internet of Things', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'SDN'},
+    '23AI702': {'name': 'Natural Language Processing', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'HYS'},
+    '23AI703': {'name': 'Cloud Computing', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'MHC'},
+    '23AI704D': {'name': 'AI for Predictive Analytics and IoT', 'ltp': '3-0-0', 'credits': '3', 'faculty': 'ANS'},
+    '23AIL705': {'name': 'NLP and Cloud Computing Lab', 'ltp': '0-0-2', 'credits': '1', 'faculty': 'HYS'},
+    '23AIP706': {'name': 'Project Work Phase-1', 'ltp': '0-0-4', 'credits': '2', 'faculty': 'ABC'}
 }
+
+def clean_subject_name(raw_name):
+    if not raw_name:
+        return ""
+    name = raw_name.strip()
+    name = name.replace('IntroducGon', 'Introduction')
+    name = name.replace('Introducon', 'Introduction')
+    name = name.replace('Compu(er', 'Computer')
+    name = name.replace('Orguni1.11tion', 'Organization')
+    name = name.replace('Enginccring', 'Engineering')
+    name = name.replace('Data Scicnce', 'Data Science')
+    name = re.sub(r'\s+', ' ', name)
+    return name
 
 def normalize_subject_code(raw_code):
     if not raw_code:
@@ -48,40 +99,87 @@ def normalize_subject_code(raw_code):
         code = '24AI306A'
     elif code == '24AI3071':
         code = '24AI307A'
+    elif code == '24A1306A':
+        code = '24AI306A'
+    elif code == '24A1307A':
+        code = '24AI307A'
+    elif code == '24A1302':
+        code = '24AI302'
+    elif code == '24A1303':
+        code = '24AI303'
+    elif code == '24A1304':
+        code = '24AI304'
+    elif code == '24A1305':
+        code = '24AI305'
     return code
 
 def parse_timetable_from_image(image_file_or_bytes):
     """
     Parses an institutional timetable circular image into structured weekly timetable slots.
-    Returns:
-    {
-      "detected_semester_number": int,
-      "detected_classroom": str,
-      "detected_lab": str,
-      "legend": list of dicts,
-      "grid": dict of days -> periods -> cell,
-      "entries": list of ready-to-save timetable dicts
-    }
+    Handles images (PNG, JPEG, WEBP) as well as PDFs with dynamic resolution normalization,
+    contrast enhancement, and robust timetable slot alignment.
     """
     try:
         import winocr
     except ImportError:
         winocr = None
 
+    img = None
+    # 1. Load image (handling raw bytes, file-like objects, paths, or PDF bytes)
     if isinstance(image_file_or_bytes, (bytes, bytearray)):
-        img = Image.open(io.BytesIO(image_file_or_bytes))
+        if image_file_or_bytes.startswith(b'%PDF'):
+            import pymupdf
+            doc = pymupdf.open(stream=image_file_or_bytes, filetype="pdf")
+            page = doc[0]
+            pix = page.get_pixmap(dpi=300)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+        else:
+            img = Image.open(io.BytesIO(image_file_or_bytes))
     elif hasattr(image_file_or_bytes, 'read'):
-        img = Image.open(image_file_or_bytes)
+        content = image_file_or_bytes.read()
+        if content.startswith(b'%PDF'):
+            import pymupdf
+            doc = pymupdf.open(stream=content, filetype="pdf")
+            page = doc[0]
+            pix = page.get_pixmap(dpi=300)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+        else:
+            img = Image.open(io.BytesIO(content))
     elif isinstance(image_file_or_bytes, str) and os.path.exists(image_file_or_bytes):
-        img = Image.open(image_file_or_bytes)
+        if image_file_or_bytes.lower().endswith('.pdf'):
+            import pymupdf
+            doc = pymupdf.open(image_file_or_bytes)
+            page = doc[0]
+            pix = page.get_pixmap(dpi=300)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+        else:
+            img = Image.open(image_file_or_bytes)
     else:
         raise ValueError("Invalid image input provided to parse_timetable_from_image")
 
-    # Run OCR
+    # 2. Preprocess & Normalize Image
+    img = ImageOps.exif_transpose(img)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+
+    orig_w, orig_h = img.size
+    # Target reference width is 2700px for uniform coordinate mapping
+    target_w = 2700
+    scale = target_w / float(orig_w)
+    target_h = int(orig_h * scale)
+    img_scaled = img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+    # Enhance contrast and sharpness for maximum OCR clarity
+    enhancer = ImageEnhance.Contrast(img_scaled)
+    img_enhanced = enhancer.enhance(1.35)
+    sharpener = ImageEnhance.Sharpness(img_enhanced)
+    img_ready = sharpener.enhance(1.25)
+
+    # 3. Run OCR
     words = []
     lines_text = []
     if winocr:
-        ocr_res = winocr.recognize_pil_sync(img)
+        ocr_res = winocr.recognize_pil_sync(img_ready)
         for line in ocr_res.get('lines', []):
             line_str = line.get('text', '').strip()
             if line_str:
@@ -104,7 +202,7 @@ def parse_timetable_from_image(image_file_or_bytes):
 
     full_text = " ".join(w['text'] for w in words)
 
-    # 1. Detect Semester Number
+    # 4. Detect Semester Number
     detected_sem_num = None
     if re.search(r'\b(?:III|Ill|111|3rd|3)\s*(?:Semester|Sentes|Sem)', full_text, re.I):
         detected_sem_num = 3
@@ -117,14 +215,14 @@ def parse_timetable_from_image(image_file_or_bytes):
     elif re.search(r'\b(?:VII|V11|7th|7)\s*(?:Semester|Sentes|Sem)', full_text, re.I):
         detected_sem_num = 7
 
-    # 2. Detect Classroom & Lab
+    # 5. Detect Classroom & Lab
     cr_match = re.search(r'Classroom\s*:\s*([A-Z0-9]+)', full_text, re.I)
     detected_classroom = cr_match.group(1).replace('J', 'I').replace('O', '0') if cr_match else ('AI302' if detected_sem_num == 3 else 'AI301')
 
     detected_lab = 'SA-205 / MB-202' if ('SA-205' in full_text or 'MB-202' in full_text) else 'SA-205'
 
-    # 3. Detect Legend Table (Subject code -> Subject name -> Faculty Initials)
-    legend_words = [w for w in words if w['y'] >= 1550 and w['y'] < 3000]
+    # 6. Detect Legend Table (Subject code -> Subject name -> Faculty Initials)
+    legend_words = [w for w in words if w['y'] >= 1520 and w['y'] < 3050]
     legend_words.sort(key=lambda w: w['y'])
 
     legend_rows = []
@@ -142,7 +240,7 @@ def parse_timetable_from_image(image_file_or_bytes):
     if current_row:
         legend_rows.append(current_row)
 
-    legend_map = {} # code -> { name, faculty_initials, ltp, credits }
+    legend_map = {}  # code -> { name, faculty_initials, ltp, credits }
     code_regex = re.compile(r'^(2[3-6][A-Z0-9]+)$', re.I)
 
     for r in legend_rows:
@@ -150,15 +248,15 @@ def parse_timetable_from_image(image_file_or_bytes):
         first_word = r[0]['text'].strip().upper()
         norm_first = normalize_subject_code(first_word)
         if code_regex.match(norm_first):
-            fac_words = [w['text'].replace(',', '').strip().upper() for w in r if w['x'] >= 2050]
-            ltp_words = [w['text'] for w in r if 1700 <= w['x'] < 1850]
-            credit_words = [w['text'] for w in r if 1850 <= w['x'] < 2050]
-            name_words = [w['text'] for w in r if 650 <= w['x'] < 1700]
+            fac_words = [w['text'].replace(',', '').strip().upper() for w in r if w['x'] >= 2040]
+            ltp_words = [w['text'] for w in r if 1680 <= w['x'] < 1850]
+            credit_words = [w['text'] for w in r if 1850 <= w['x'] < 2040]
+            name_words = [w['text'] for w in r if 640 <= w['x'] < 1680]
 
-            name = " ".join(name_words)
+            name = clean_subject_name(" ".join(name_words))
             ltp = ltp_words[0] if ltp_words else "3-0-0"
             credits_val = credit_words[0] if credit_words else "3"
-            
+
             cleaned_fac = []
             for fw in fac_words:
                 f_clean = re.sub(r'[^A-Z]', '', fw)
@@ -176,7 +274,7 @@ def parse_timetable_from_image(image_file_or_bytes):
                 'faculty_initials': cleaned_fac
             }
 
-    # Inject known special subjects if not parsed cleanly from legend
+    # Inject or refine known special subjects
     for k_code, k_info in KNOWN_SPECIAL_SUBJECTS.items():
         if k_code not in legend_map:
             legend_map[k_code] = {
@@ -186,8 +284,17 @@ def parse_timetable_from_image(image_file_or_bytes):
                 'credits': k_info['credits'],
                 'faculty_initials': [k_info['faculty']]
             }
+        else:
+            # If name was parsed partially or with OCR typo, use clean known canonical title
+            cur_entry = legend_map[k_code]
+            if not cur_entry.get('name') or len(cur_entry.get('name', '')) < 5:
+                cur_entry['name'] = k_info['name']
+            else:
+                cur_entry['name'] = clean_subject_name(cur_entry['name'])
+            if not cur_entry.get('faculty_initials'):
+                cur_entry['faculty_initials'] = [k_info['faculty']]
 
-    # 4. Detect Day Rows
+    # 7. Detect Day Rows (Monday through Saturday)
     days_map = {
         'monday': 'MON', 'mon': 'MON',
         'tuesday': 'TUE', 'tue': 'TUE',
@@ -200,7 +307,7 @@ def parse_timetable_from_image(image_file_or_bytes):
     detected_days = []
     for w in words:
         clean = re.sub(r'[^a-zA-Z]', '', w['text'].lower())
-        if clean in days_map:
+        if clean in days_map and w['x'] < 600:
             detected_days.append({
                 'day': days_map[clean],
                 'y': w['y'],
@@ -218,46 +325,63 @@ def parse_timetable_from_image(image_file_or_bytes):
 
     # Pre-fetch database faculty for matching
     all_faculty = Faculty.query.all()
-    faculty_by_id = {f.id: f for f in all_faculty}
 
     def resolve_faculty(initials_list, default_sub_code=""):
-        # Match initials to DB faculty
+        norm_code = normalize_subject_code(default_sub_code)
+
+        # 1. Match initials in initials_list
         for init in initials_list:
-            full_name = INITIALS_TO_NAMES.get(init)
+            mapped_init = INITIALS_ALIASES.get(init, init)
+            full_name = INITIALS_TO_NAMES.get(mapped_init)
             if full_name:
                 for f in all_faculty:
                     if f.name.lower().strip() == full_name.lower().strip():
                         return f
+                    if any(part in f.name.lower() for part in full_name.lower().split() if len(part) > 2):
+                        return f
             for f in all_faculty:
-                if f.login_id and f.login_id.lower() == init.lower():
+                if f.login_id and f.login_id.lower() == mapped_init.lower():
                     return f
 
-        # Subject code heuristic matching for CSE (AI & ML) core staff
-        sub_upper = default_sub_code.upper()
-        if '304' in sub_upper or '308' in sub_upper:
-            # Maseeha Banu
-            return next((f for f in all_faculty if 'maseeha' in f.name.lower()), all_faculty[0])
-        elif '302' in sub_upper:
-            # Swathi H Y
-            return next((f for f in all_faculty if 'swathi' in f.name.lower()), all_faculty[0])
-        elif '303' in sub_upper:
-            # Sheethal D N
-            return next((f for f in all_faculty if 'sheethal' in f.name.lower()), all_faculty[0])
-        elif '305' in sub_upper:
-            # Dr. Arjun B C
-            return next((f for f in all_faculty if 'arjun' in f.name.lower()), all_faculty[0])
-        elif '306' in sub_upper:
-            # Swathi H Y / Sheethal D N
-            return next((f for f in all_faculty if 'swathi' in f.name.lower() or 'sheethal' in f.name.lower()), all_faculty[0])
-        elif '307' in sub_upper:
-            # Ankitha S
-            return next((f for f in all_faculty if 'ankitha' in f.name.lower()), all_faculty[0])
-        elif 'SCR' in sub_upper:
-            # Megha H C
-            return next((f for f in all_faculty if 'megha' in f.name.lower()), all_faculty[0])
-        elif 'MAAI' in sub_upper or 'BCM' in sub_upper:
-            # Math faculty or coordinator
-            return next((f for f in all_faculty if 'ankitha' in f.name.lower() or 'swathi' in f.name.lower()), all_faculty[0])
+        # 2. Check canonical known subject faculty
+        if norm_code in KNOWN_SPECIAL_SUBJECTS:
+            def_init = KNOWN_SPECIAL_SUBJECTS[norm_code].get('faculty')
+            if def_init:
+                full_name = INITIALS_TO_NAMES.get(def_init)
+                if full_name:
+                    for f in all_faculty:
+                        if full_name.lower() in f.name.lower() or any(part in f.name.lower() for part in full_name.lower().split() if len(part) > 3):
+                            return f
+
+        # 3. Subject-based faculty assignment heuristics for Department of CSE (AI & ML)
+        sub_upper = norm_code.upper()
+        if '304' in sub_upper or '308' in sub_upper or 'NYP' in sub_upper:
+            m = next((f for f in all_faculty if 'maseeha' in f.name.lower()), None)
+            if m: return m
+        if '302' in sub_upper:
+            s = next((f for f in all_faculty if 'swathi' in f.name.lower()), None)
+            if s: return s
+        if '303' in sub_upper or '503' in sub_upper or '701' in sub_upper:
+            sh = next((f for f in all_faculty if 'sheethal' in f.name.lower() or 'shithal' in f.name.lower()), None)
+            if sh: return sh
+        if '305' in sub_upper or '501' in sub_upper or '706' in sub_upper:
+            ar = next((f for f in all_faculty if 'arjun' in f.name.lower()), None)
+            if ar: return ar
+        if '306' in sub_upper or '504' in sub_upper or '702' in sub_upper:
+            sw = next((f for f in all_faculty if 'swathi' in f.name.lower()), None)
+            if sw: return sw
+        if '307' in sub_upper or '502' in sub_upper or '704' in sub_upper:
+            an = next((f for f in all_faculty if 'ankitha' in f.name.lower()), None)
+            if an: return an
+        if '505' in sub_upper:
+            sm = next((f for f in all_faculty if 'sushma' in f.name.lower()), None)
+            if sm: return sm
+        if 'SCR' in sub_upper or '703' in sub_upper:
+            mg = next((f for f in all_faculty if 'megha' in f.name.lower()), None)
+            if mg: return mg
+        if 'MAAI' in sub_upper or 'BCM' in sub_upper:
+            an = next((f for f in all_faculty if 'ankitha' in f.name.lower()), None)
+            if an: return an
 
         return all_faculty[0] if all_faculty else None
 
@@ -268,7 +392,7 @@ def parse_timetable_from_image(image_file_or_bytes):
     db_subjects = Subject.query.filter_by(semester_id=semester_record.id).all() if semester_record else Subject.query.all()
     db_subjects_by_code = {s.code.upper(): s for s in db_subjects}
 
-    # Grid mapping
+    # 8. Grid mapping across detected days
     grid_data = {
         'MON': {}, 'TUE': {}, 'WED': {}, 'THU': {}, 'FRI': {}, 'SAT': {}
     }
@@ -277,7 +401,7 @@ def parse_timetable_from_image(image_file_or_bytes):
     for i, d in enumerate(unique_days):
         day_key = d['day']
         y_start = d['y'] - 30
-        y_end = unique_days[i+1]['y'] - 30 if i + 1 < len(unique_days) else d['y'] + 80
+        y_end = unique_days[i+1]['y'] - 30 if i + 1 < len(unique_days) else d['y'] + 100
 
         row_words = [w for w in words if y_start <= w['cy'] <= y_end and w['x'] > d['x'] + 50]
 
@@ -292,16 +416,6 @@ def parse_timetable_from_image(image_file_or_bytes):
                     'cx': rw['cx']
                 })
 
-        # Map tokens to periods based on x coordinates:
-        # P1: 650 - 950 (09:30-10:30)
-        # P2: 1000 - 1220 (11:00-12:00)
-        # P2-P3 Lab: 1220 - 1320 (11:00-13:00) -> Placed at P2 (2 hrs)
-        # P3: 1320 - 1600 (12:00-13:00)
-        # P4: 1700 - 1880 (14:00-15:00)
-        # P4-P5 Lab: 1880 - 1980 (14:00-16:00) -> Placed at P4 (2 hrs)
-        # P5: 1980 - 2180 (15:00-16:00)
-        # P6: 2180 - 2450 (16:00-17:00)
-
         covered_periods = set()
 
         for token in code_tokens:
@@ -315,11 +429,11 @@ def parse_timetable_from_image(image_file_or_bytes):
             start_time = "09:30"
             end_time = "10:30"
 
-            if 650 <= x <= 950:
+            if 650 <= x <= 980:
                 period_id = 'p1'
                 start_time = '09:30'
                 end_time = '10:30'
-            elif 1220 <= x <= 1320:
+            elif 1220 <= x <= 1340:
                 # 2-hour lab spanning P2 and P3 (11:00 - 13:00)
                 period_id = 'p2'
                 is_lab = True
@@ -331,7 +445,7 @@ def parse_timetable_from_image(image_file_or_bytes):
                 period_id = 'p2'
                 start_time = '11:00'
                 end_time = '12:00'
-            elif 1320 < x <= 1600:
+            elif 1340 < x <= 1640:
                 if 'p3' not in covered_periods:
                     period_id = 'p3'
                     start_time = '12:00'
@@ -344,16 +458,16 @@ def parse_timetable_from_image(image_file_or_bytes):
                 start_time = '14:00'
                 end_time = '16:00'
                 covered_periods.add('p5')
-            elif 1700 <= x < 1860:
+            elif 1660 <= x < 1860:
                 period_id = 'p4'
                 start_time = '14:00'
                 end_time = '15:00'
-            elif 1980 < x <= 2180:
+            elif 1980 < x <= 2200:
                 if 'p5' not in covered_periods:
                     period_id = 'p5'
                     start_time = '15:00'
                     end_time = '16:00'
-            elif 2180 < x <= 2450:
+            elif 2200 < x <= 2500:
                 period_id = 'p6'
                 start_time = '16:00'
                 end_time = '17:00'
@@ -362,7 +476,7 @@ def parse_timetable_from_image(image_file_or_bytes):
                 continue
 
             # Check if lab by code name or legend
-            if 'AIL' in code or 'lab' in legend_map.get(code, {}).get('name', '').lower():
+            if 'AIL' in code or 'lab' in legend_map.get(code, {}).get('name', '').lower() or code in ['24AIL308', '24AI307A', '24AIL506', '24AIL507']:
                 is_lab = True
                 duration = 2
                 if period_id == 'p2':
@@ -376,9 +490,11 @@ def parse_timetable_from_image(image_file_or_bytes):
             subj_obj = db_subjects_by_code.get(code)
             subj_name = ""
             if subj_obj:
-                subj_name = subj_obj.name
+                subj_name = clean_subject_name(subj_obj.name)
             elif code in legend_map:
-                subj_name = legend_map[code]['name']
+                subj_name = clean_subject_name(legend_map[code]['name'])
+            elif code in KNOWN_SPECIAL_SUBJECTS:
+                subj_name = KNOWN_SPECIAL_SUBJECTS[code]['name']
             else:
                 subj_name = code
 
@@ -423,4 +539,3 @@ def parse_timetable_from_image(image_file_or_bytes):
         'entries': entries_list,
         'total_extracted': len(entries_list)
     }
-

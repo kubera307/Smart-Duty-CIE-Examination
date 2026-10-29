@@ -539,7 +539,15 @@ def assign_by_duty_quotas():
     strictly according to the configured quotas and 3rd sem regular timetable protection.
     """
     data = request.get_json() or {}
-    cie_id = int(data.get('cie_id') or 1)
+    cie_id_val = data.get('cie_id')
+    if not cie_id_val:
+        current_cie = CIE.query.filter_by(is_current=True).first() or CIE.query.first()
+        cie_id = current_cie.id if current_cie else 4
+    else:
+        cie_id = int(cie_id_val)
+
+    sem_id = data.get('semester_id')
+    sem_ids = data.get('semester_ids')
 
     # First apply any updated quotas if supplied
     if data.get('raw_text') or data.get('quotas'):
@@ -560,10 +568,16 @@ def assign_by_duty_quotas():
 
     # Trigger allocation engine
     user_identifier = request.headers.get('X-User', 'Admin')
+    include_one_credit = bool(data.get('include_one_credit', False))
+    include_squad = bool(data.get('include_squad', False))
     try:
         alloc_res = AllocationEngine.generate_cie_allocation(
             cie_id=cie_id,
-            user_identifier=user_identifier
+            user_identifier=user_identifier,
+            semester_id=int(sem_id) if sem_id else None,
+            semester_ids=[int(s) for s in sem_ids] if sem_ids else None,
+            include_one_credit=include_one_credit,
+            include_squad=include_squad
         )
         return jsonify({
             'success': True,

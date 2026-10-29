@@ -13,10 +13,14 @@ def get_allocation_preview(cie_id):
     """Pre-allocation audit diagnostic before running the engine, optionally filtered by semester or semesters."""
     sem_id = request.args.get('semester_id')
     sem_ids = request.args.getlist('semester_ids') or (request.args.get('semester_ids').split(',') if request.args.get('semester_ids') else None)
+    include_one_credit = request.args.get('include_one_credit', 'false').lower() == 'true'
+    include_squad = request.args.get('include_squad', 'false').lower() == 'true'
     preview = AllocationEngine.get_pre_allocation_audit(
         cie_id=cie_id,
         semester_id=int(sem_id) if sem_id else None,
-        semester_ids=[int(s) for s in sem_ids if s] if sem_ids else None
+        semester_ids=[int(s) for s in sem_ids if s] if sem_ids else None,
+        include_one_credit=include_one_credit,
+        include_squad=include_squad
     )
     if 'error' in preview:
         return jsonify(preview), 404
@@ -33,6 +37,8 @@ def generate_allocation():
 
     sem_id = data.get('semester_id')
     sem_ids = data.get('semester_ids')
+    include_one_credit = bool(data.get('include_one_credit', False))
+    include_squad = bool(data.get('include_squad', False))
     user_identifier = request.headers.get('X-User', 'Admin')
 
     try:
@@ -40,7 +46,9 @@ def generate_allocation():
             cie_id=int(cie_id),
             user_identifier=user_identifier,
             semester_id=int(sem_id) if sem_id else None,
-            semester_ids=[int(s) for s in sem_ids] if sem_ids else None
+            semester_ids=[int(s) for s in sem_ids] if sem_ids else None,
+            include_one_credit=include_one_credit,
+            include_squad=include_squad
         )
         return jsonify(result), 200
     except ValueError as ve:

@@ -64,13 +64,17 @@ class TimetableEntry(db.Model):
     start_time = db.Column(db.String(5), nullable=False)   # HH:MM (e.g., '09:00')
     end_time = db.Column(db.String(5), nullable=False)     # HH:MM (e.g., '10:00')
     room_number = db.Column(db.String(50), nullable=True)
+    department = db.Column(db.String(100), default='CSE (AI & ML)')
 
     def to_dict(self):
+        dept = self.department or (self.subject.department if self.subject else 'CSE (AI & ML)')
         return {
             'id': self.id,
             'semester_id': self.semester_id,
             'semester_name': self.semester.name if self.semester else None,
             'sem_number': self.semester.sem_number if self.semester else None,
+            'department': dept,
+            'branch': dept,
             'faculty_id': self.faculty_id,
             'faculty_name': self.faculty.name if self.faculty else None,
             'faculty_designation': self.faculty.designation if self.faculty else None,

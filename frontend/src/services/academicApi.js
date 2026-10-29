@@ -14,6 +14,7 @@ export const academicApi = {
     api.post('/academic/timetables/parse-image', formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
     }),
+  parseSampleCircular: () => api.post('/academic/timetables/parse-sample'),
 };
 
 
