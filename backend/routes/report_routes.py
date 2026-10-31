@@ -267,8 +267,8 @@ def get_cie_report_data(cie_id):
                         if not matching_d:
                             matching_d = next((d for d in invig_duties if not d.exam_room_id and d.faculty_id), None)
                         
-                        fac_name = matching_d.faculty.name if (matching_d and matching_d.faculty) else 'Standby'
-                        fac_init = get_faculty_initials(matching_d.faculty.name if matching_d and matching_d.faculty else None) or 'SB'
+                        fac_name = matching_d.faculty.name if (matching_d and matching_d.faculty) else ''
+                        fac_init = get_faculty_initials(matching_d.faculty.name if matching_d and matching_d.faculty else None) or ''
                         rooms_data.append({
                             'room_no': er.room_number,
                             'faculty': fac_init,
@@ -278,8 +278,8 @@ def get_cie_report_data(cie_id):
                 elif invig_duties:
                     for d in invig_duties:
                         r_no = d.exam_room.room_number if d.exam_room else (sess.room_number or 'AI301')
-                        fac_name = d.faculty.name if d.faculty else 'Standby'
-                        fac_init = get_faculty_initials(d.faculty.name if d.faculty else None) or 'SB'
+                        fac_name = d.faculty.name if d.faculty else ''
+                        fac_init = get_faculty_initials(d.faculty.name if d.faculty else None) or ''
                         rooms_data.append({
                             'room_no': r_no,
                             'faculty': fac_init,
@@ -289,13 +289,13 @@ def get_cie_report_data(cie_id):
                 else:
                     rooms_data.append({
                         'room_no': 'AI301',
-                        'faculty': 'SB',
-                        'faculty_name': 'Standby Invigilator'
+                        'faculty': '',
+                        'faculty_name': ''
                     })
                     rooms_data.append({
                         'room_no': 'AI302',
-                        'faculty': 'SB',
-                        'faculty_name': 'Standby Invigilator'
+                        'faculty': '',
+                        'faculty_name': ''
                     })
                     total_invig_count += 2
 
