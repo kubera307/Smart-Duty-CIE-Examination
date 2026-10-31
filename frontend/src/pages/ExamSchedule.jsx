@@ -1767,27 +1767,8 @@ const ExamSchedule = () => {
           </p>
         </div>
 
-        {/* Primary Actions: Duty Quotas, Auto-Assign, Create Duty */}
+        {/* Primary Action: Create Duty */}
         <div className="flex items-center gap-2.5 shrink-0">
-          <button
-            onClick={() => setIsQuotaModalOpen(true)}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs"
-            title="Configure individual faculty duty quotas and seniority protection"
-          >
-            <ShieldCheck className="w-4 h-4 text-purple-600" />
-            <span>Duty Quotas</span>
-          </button>
-
-          <button
-            onClick={handleAutoAssignAllDuties}
-            disabled={isAutoAssigningAll}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all cursor-pointer disabled:opacity-50"
-            title="Auto-assign examination duties based on configured quotas and timetable"
-          >
-            <Zap className="w-4 h-4" />
-            <span>{isAutoAssigningAll ? 'Assigning...' : 'Auto-Assign'}</span>
-          </button>
-
           <button
             onClick={() => {
               if (selectedCycle === 'even') {
