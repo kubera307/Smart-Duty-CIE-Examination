@@ -234,6 +234,19 @@ const Timetables = () => {
     setTimeout(() => setSuccessToast(null), 3500);
   };
 
+  const formatPeriodTime = (time) => {
+    const [hour, minute] = time.split(':').map(Number);
+    const displayHour = hour % 12 || 12;
+    return `${String(displayHour).padStart(2, '0')}:${String(minute).padStart(2, '0')} ${hour >= 12 ? 'PM' : 'AM'}`;
+  };
+
+  const getExtractedPeriodTimeLabel = (periodId, fallback) => {
+    const period = imageParseResult?.period_schedule?.[periodId];
+    return period
+      ? `${formatPeriodTime(period.start_time)} - ${formatPeriodTime(period.end_time)}`
+      : fallback;
+  };
+
   useEffect(() => {
     loadInitialData();
   }, []);
@@ -2706,33 +2719,33 @@ const Timetables = () => {
                             </th>
                             <th className="py-2 px-1 text-center border-r border-slate-300 min-w-[130px]">
                               <div className="text-slate-900 font-black">I</div>
-                              <div className="text-[9px] text-slate-500 font-mono">09:30 - 10:30</div>
+                              <div className="text-[9px] text-slate-500 font-mono">{getExtractedPeriodTimeLabel('p1', '09:30 - 10:30')}</div>
                             </th>
                             <th className="py-2 px-1 text-center border-r border-slate-300 bg-amber-50/70 text-amber-900 font-bold text-[9px] w-10">
                               TEA
                             </th>
                             <th className="py-2 px-1 text-center border-r border-slate-300 min-w-[130px]">
                               <div className="text-slate-900 font-black">II</div>
-                              <div className="text-[9px] text-slate-500 font-mono">11:00 - 12:00</div>
+                              <div className="text-[9px] text-slate-500 font-mono">{getExtractedPeriodTimeLabel('p2', '11:00 - 12:00')}</div>
                             </th>
                             <th className="py-2 px-1 text-center border-r border-slate-300 min-w-[130px]">
                               <div className="text-slate-900 font-black">III</div>
-                              <div className="text-[9px] text-slate-500 font-mono">12:00 - 01:00</div>
+                              <div className="text-[9px] text-slate-500 font-mono">{getExtractedPeriodTimeLabel('p3', '12:00 - 01:00')}</div>
                             </th>
                             <th className="py-2 px-1 text-center border-r border-slate-300 bg-amber-50/70 text-amber-900 font-bold text-[9px] w-12">
                               LUNCH
                             </th>
                             <th className="py-2 px-1 text-center border-r border-slate-300 min-w-[130px]">
                               <div className="text-slate-900 font-black">IV</div>
-                              <div className="text-[9px] text-slate-500 font-mono">02:00 - 03:00</div>
+                              <div className="text-[9px] text-slate-500 font-mono">{getExtractedPeriodTimeLabel('p4', '02:00 - 03:00')}</div>
                             </th>
                             <th className="py-2 px-1 text-center border-r border-slate-300 min-w-[130px]">
                               <div className="text-slate-900 font-black">V</div>
-                              <div className="text-[9px] text-slate-500 font-mono">03:00 - 04:00</div>
+                              <div className="text-[9px] text-slate-500 font-mono">{getExtractedPeriodTimeLabel('p5', '03:00 - 04:00')}</div>
                             </th>
                             <th className="py-2 px-1 text-center min-w-[130px]">
                               <div className="text-slate-900 font-black">VI</div>
-                              <div className="text-[9px] text-slate-500 font-mono">04:00 - 05:00</div>
+                              <div className="text-[9px] text-slate-500 font-mono">{getExtractedPeriodTimeLabel('p6', '04:00 - 05:00')}</div>
                             </th>
                           </tr>
                         </thead>

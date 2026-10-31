@@ -497,11 +497,8 @@ const FacultyDirectory = () => {
           </table>
         </div>
 
-        <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">
+        <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 text-xs text-slate-500">
           <span>Showing <strong>{filteredFaculty.length}</strong> faculty members</span>
-          <div className="flex items-center gap-2 font-medium">
-            <span>Default Staff Password: <code className="font-mono text-slate-700 font-bold">staff123</code></span>
-          </div>
         </div>
       </div>
 

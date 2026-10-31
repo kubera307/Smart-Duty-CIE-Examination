@@ -113,6 +113,79 @@ def normalize_subject_code(raw_code):
         code = '24AI305'
     return code
 
+def _extract_period_schedule(words, first_day_y):
+    time_pattern = re.compile(r'(?<!\d)(\d{1,2})[:.](\d{2})(?!\d)')
+    time_tokens = []
+
+    for word in words:
+        if word['y'] < first_day_y - 320 or word['y'] >= first_day_y or not 600 <= word['cx'] <= 2600:
+            continue
+        for match in time_pattern.finditer(word['text']):
+            time_tokens.append({
+                'x': word['cx'],
+                'y': word['y'],
+                'order': match.start(),
+                'value': int(match.group(1)) * 60 + int(match.group(2))
+            })
+
+    time_tokens.sort(key=lambda token: token['x'])
+    columns = []
+    for token in time_tokens:
+        if not columns or token['x'] - columns[-1]['center'] > 100:
+            columns.append({'center': token['x'], 'tokens': [token]})
+        else:
+            column = columns[-1]
+            column['tokens'].append(token)
+            column['center'] = sum(item['x'] for item in column['tokens']) / len(column['tokens'])
+
+    headers = []
+    previous_start = None
+    for column in columns:
+        tokens = sorted(column['tokens'], key=lambda token: (token['y'], token['order']))
+        if len(tokens) < 2:
+            continue
+
+        start = tokens[0]['value']
+        end = tokens[-1]['value']
+        if previous_start is not None:
+            while start < previous_start:
+                start += 12 * 60
+        while end <= start:
+            end += 12 * 60
+
+        headers.append({
+            'center': column['center'],
+            'start': start,
+            'end': end
+        })
+        previous_start = start
+
+    period_schedule = {}
+    class_headers = []
+    for index, header in enumerate(headers):
+        next_header = headers[index + 1] if index + 1 < len(headers) else None
+        is_short_break = header['end'] - header['start'] <= 30
+        is_lunch_break = (
+            next_header is not None
+            and header['end'] - header['start'] >= 45
+            and header['start'] >= 12 * 60
+            and next_header['start'] - header['end'] >= 30
+        )
+        if not is_short_break and not is_lunch_break:
+            class_headers.append(header)
+
+    for period_id, header in zip(
+        ['p1', 'p2', 'p3', 'p4', 'p5', 'p6'],
+        class_headers
+    ):
+        period_schedule[period_id] = {
+            'start_time': f"{header['start'] // 60:02d}:{header['start'] % 60:02d}",
+            'end_time': f"{header['end'] // 60:02d}:{header['end'] % 60:02d}",
+            'center': header['center']
+        }
+
+    return period_schedule
+
 def parse_timetable_from_image(image_file_or_bytes):
     """
     Parses an institutional timetable circular image into structured weekly timetable slots.
@@ -323,6 +396,18 @@ def parse_timetable_from_image(image_file_or_bytes):
             seen.add(d['day'])
             unique_days.append(d)
 
+    period_schedule = _extract_period_schedule(words, unique_days[0]['y']) if unique_days else {}
+
+    def period_time_range(period_id, fallback):
+        period = period_schedule.get(period_id)
+        if not period:
+            return fallback
+        return period['start_time'], period['end_time']
+
+    p2_lab_end = period_time_range('p3', ('12:00', '13:00'))[1]
+    p4_lab_end = period_time_range('p5', ('15:00', '16:00'))[1]
+    period_order = ['p1', 'p2', 'p3', 'p4', 'p5', 'p6']
+
     # Pre-fetch database faculty for matching
     all_faculty = Faculty.query.all()
 
@@ -429,61 +514,77 @@ def parse_timetable_from_image(image_file_or_bytes):
             start_time = "09:30"
             end_time = "10:30"
 
-            if 650 <= x <= 980:
+            if period_schedule:
+                period_id = min(
+                    period_schedule,
+                    key=lambda key: abs(x - period_schedule[key]['center'])
+                )
+                start_time, end_time = period_time_range(period_id, ('09:30', '10:30'))
+            elif 650 <= x <= 980:
                 period_id = 'p1'
-                start_time = '09:30'
-                end_time = '10:30'
+                start_time, end_time = ('09:30', '10:30')
             elif 1220 <= x <= 1340:
-                # 2-hour lab spanning P2 and P3 (11:00 - 13:00)
                 period_id = 'p2'
                 is_lab = True
                 duration = 2
-                start_time = '11:00'
-                end_time = '13:00'
+                start_time, end_time = ('11:00', '13:00')
                 covered_periods.add('p3')
             elif 1000 <= x < 1220:
                 period_id = 'p2'
-                start_time = '11:00'
-                end_time = '12:00'
+                start_time, end_time = ('11:00', '12:00')
             elif 1340 < x <= 1640:
                 if 'p3' not in covered_periods:
                     period_id = 'p3'
-                    start_time = '12:00'
-                    end_time = '13:00'
+                    start_time, end_time = ('12:00', '13:00')
             elif 1860 <= x <= 1980:
-                # 2-hour lab / practical spanning P4 and P5 (14:00 - 16:00)
                 period_id = 'p4'
                 is_lab = True
                 duration = 2
-                start_time = '14:00'
-                end_time = '16:00'
+                start_time, end_time = ('14:00', '16:00')
                 covered_periods.add('p5')
             elif 1660 <= x < 1860:
                 period_id = 'p4'
-                start_time = '14:00'
-                end_time = '15:00'
+                start_time, end_time = ('14:00', '15:00')
             elif 1980 < x <= 2200:
                 if 'p5' not in covered_periods:
                     period_id = 'p5'
-                    start_time = '15:00'
-                    end_time = '16:00'
+                    start_time, end_time = ('15:00', '16:00')
             elif 2200 < x <= 2500:
                 period_id = 'p6'
-                start_time = '16:00'
-                end_time = '17:00'
+                start_time, end_time = ('16:00', '17:00')
 
             if not period_id:
                 continue
+            if period_id in covered_periods:
+                continue
+
+            period_index = period_order.index(period_id)
+            if period_index < len(period_order) - 1:
+                next_period_id = period_order[period_index + 1]
+                current_period = period_schedule.get(period_id)
+                next_period = period_schedule.get(next_period_id)
+                if (
+                    current_period
+                    and next_period
+                    and current_period['end_time'] == next_period['start_time']
+                ):
+                    midpoint = (current_period['center'] + next_period['center']) / 2
+                    spacing = next_period['center'] - current_period['center']
+                    if abs(token['cx'] - midpoint) <= min(90, spacing * 0.3):
+                        duration = 2
+                        is_lab = True
+                        end_time = period_time_range(next_period_id, (end_time, end_time))[1]
+                        covered_periods.add(next_period_id)
 
             # Check if lab by code name or legend
             if 'AIL' in code or 'lab' in legend_map.get(code, {}).get('name', '').lower() or code in ['24AIL308', '24AI307A', '24AIL506', '24AIL507']:
                 is_lab = True
                 duration = 2
                 if period_id == 'p2':
-                    end_time = '13:00'
+                    end_time = p2_lab_end
                     covered_periods.add('p3')
                 elif period_id == 'p4':
-                    end_time = '16:00'
+                    end_time = p4_lab_end
                     covered_periods.add('p5')
 
             # Subject lookup
@@ -535,6 +636,13 @@ def parse_timetable_from_image(image_file_or_bytes):
         'detected_classroom': detected_classroom,
         'detected_lab': detected_lab,
         'legend': list(legend_map.values()),
+        'period_schedule': {
+            period_id: {
+                'start_time': period['start_time'],
+                'end_time': period['end_time']
+            }
+            for period_id, period in period_schedule.items()
+        },
         'grid': grid_data,
         'entries': entries_list,
         'total_extracted': len(entries_list)

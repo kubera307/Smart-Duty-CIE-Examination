@@ -7,7 +7,7 @@ class AllocationValidator:
     """
 
     @classmethod
-    def validate_manual_assignment(cls, faculty, exam_session, all_active_semesters, buffer_minutes=60, duty_type='Invigilation'):
+    def validate_manual_assignment(cls, faculty, exam_session, all_active_semesters, buffer_minutes=60, duty_type='Invigilation', exclude_duty_id=None):
         """
         Validates a proposed manual assignment or reassignment.
         
@@ -31,7 +31,8 @@ class AllocationValidator:
             exam_session=exam_session,
             regular_semester_ids=sem_status['regular_class_semester_ids'],
             buffer_minutes=buffer_minutes,
-            duty_type=duty_type
+            duty_type=duty_type,
+            exclude_duty_id=exclude_duty_id
         )
 
         errors = []
@@ -39,7 +40,7 @@ class AllocationValidator:
 
         if not eval_result['is_eligible']:
             for r in eval_result['disqualification_reasons']:
-                if 'Timetable Conflict' in r or 'Simultaneous' in r or 'excluded' in r.lower():
+                if 'Timetable Conflict' in r or 'duty buffer violation' in r.lower() or 'excluded' in r.lower():
                     errors.append(r)
                 else:
                     warnings.append(r)
@@ -51,4 +52,3 @@ class AllocationValidator:
             'errors': errors,
             'conflict_details': eval_result['conflict_details']
         }
-

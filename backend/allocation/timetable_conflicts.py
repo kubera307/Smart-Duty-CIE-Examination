@@ -1,3 +1,5 @@
+import re
+
 from .buffer_rules import BufferRuleEvaluator
 
 class TimetableConflictEngine:
@@ -36,8 +38,8 @@ class TimetableConflictEngine:
         
         if 'NYP' in sub_code or 'SCR' in sub_code:
             return True
-        keywords = ['nss', 'yoga', 'pe', 'physical education', 'sports', 'music', 'community project', 'societal project', 'social connect']
-        return any(k in sub_name for k in keywords)
+        keywords = ['nss', 'yoga', 'physical education', 'sports', 'music', 'community project', 'societal project', 'social connect']
+        return any(k in sub_name for k in keywords) or bool(re.search(r'\bpe\b', sub_name))
 
     @classmethod
     def check_faculty_timetable_conflicts(cls, faculty, exam_session, regular_semester_ids, buffer_minutes=60):
@@ -59,11 +61,7 @@ class TimetableConflictEngine:
         conflicts = []
         checked_count = 0
 
-        # Filter timetable entries:
-        # 1. Skip NSS / Yoga / PE / SCR (user explicit rule: do not consider NSS/Yoga/PE as clash)
-        # 2. Check classes for Robotics branch (faculties take classes for Robotics branch, these are actively running)
-        # 3. Check regular semester classes for AI & ML (explicitly including 5th & 7th semesters when 3rd sem has exams)
-        is_3rd_sem_exam = exam_session.semester and exam_session.semester.sem_number == 3
+        # Skip non-blocking activities; check the same-cycle regular semesters and Robotics classes.
         relevant_entries = []
         for entry in faculty.timetable_entries:
             if entry.day_of_week != day_str:
@@ -76,9 +74,7 @@ class TimetableConflictEngine:
             dept = (entry.department or (entry.subject.department if entry.subject else '') or '').lower()
             is_robotics = 'robot' in dept
 
-            # When 3rd sem has exams, 5th and 7th sem AI&ML regular timetables MUST be checked!
-            is_sem5_sem7 = entry.semester and entry.semester.sem_number in [5, 7]
-            if is_robotics or (is_3rd_sem_exam and is_sem5_sem7) or (entry.semester_id in regular_semester_ids):
+            if is_robotics or entry.semester_id in regular_semester_ids:
                 relevant_entries.append((entry, is_robotics))
 
         checked_count = len(relevant_entries)
@@ -111,4 +107,3 @@ class TimetableConflictEngine:
             'conflicts': conflicts,
             'checked_classes_count': checked_count
         }
-

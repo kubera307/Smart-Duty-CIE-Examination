@@ -9,13 +9,57 @@ class EligibilityEngine:
     1. Active Status: Must be active faculty (is_active == True).
     2. Exclusion Flag: Must be flagged eligible_for_duty == True.
     3. Availability / Leave: Must not have recorded unavailability/leave covering this slot.
-    4. Overlapping Exam Duty: Cannot be already booked for another exam duty in the same time window.
-    5. Timetable Conflict: Must have NO regular classes in active regular-class semesters within the session time plus 1-hour buffer.
+    4. Exam Duty Buffer: Must not have simultaneous/overlapping assigned exam duties.
+    5. Timetable Conflict: Must have NO regular classes in active regular-class semesters within the session time plus buffer.
     6. Duty Capacity: Must not exceed max_duty_capacity.
     """
 
     @classmethod
-    def evaluate_candidate(cls, faculty, exam_session, regular_semester_ids, current_slot_duties=None, buffer_minutes=60, duty_type='Invigilation', run_assigned_count=0, ignore_capacity=False):
+    def get_exam_duty_buffer_conflicts(
+        cls,
+        faculty,
+        exam_session,
+        buffer_minutes=60,
+        current_slot_duties=None,
+        exclude_duty_id=None
+    ):
+        e_start = BufferRuleEvaluator.parse_minutes(exam_session.start_time)
+        e_end = BufferRuleEvaluator.parse_minutes(exam_session.end_time)
+        conflicts = []
+
+        # Check duties assigned in current optimization run
+        for duty_data in current_slot_duties or []:
+            if duty_data.get('faculty_id') != faculty.id or duty_data.get('exam_date') != exam_session.exam_date:
+                continue
+            d_start = BufferRuleEvaluator.parse_minutes(duty_data['start_time'])
+            d_end = BufferRuleEvaluator.parse_minutes(duty_data['end_time'])
+            if max(e_start, d_start - buffer_minutes) < min(e_end, d_end + buffer_minutes):
+                conflicts.append(
+                    f"Exam duty buffer violation: Assigned duty ({duty_data['start_time']}-{duty_data['end_time']}) falls within the required {buffer_minutes}-minute gap."
+                )
+
+        # Check existing duties in DB
+        sess_id = getattr(exam_session, 'id', None)
+        for duty in faculty.duties:
+            if duty.id == exclude_duty_id:
+                continue
+            if duty.status not in ('ASSIGNED', 'COMPLETED') or not duty.exam_session:
+                continue
+            if sess_id is not None and duty.exam_session_id == sess_id:
+                continue
+            if duty.exam_session.exam_date != exam_session.exam_date:
+                continue
+            d_start = BufferRuleEvaluator.parse_minutes(duty.exam_session.start_time)
+            d_end = BufferRuleEvaluator.parse_minutes(duty.exam_session.end_time)
+            if max(e_start, d_start - buffer_minutes) < min(e_end, d_end + buffer_minutes):
+                conflicts.append(
+                    f"Exam duty buffer violation: Existing duty ({duty.exam_session.start_time}-{duty.exam_session.end_time}) on {duty.exam_session.exam_date.isoformat()} falls within the required {buffer_minutes}-minute gap."
+                )
+
+        return sorted(set(conflicts))
+
+    @classmethod
+    def evaluate_candidate(cls, faculty, exam_session, regular_semester_ids, current_slot_duties=None, buffer_minutes=60, duty_type='Invigilation', run_assigned_count=0, ignore_capacity=False, exclude_duty_id=None):
         """
         Args:
             faculty: Faculty object
@@ -77,7 +121,6 @@ class EligibilityEngine:
         # 4. Explicit Availability / Leave Check
         e_start = BufferRuleEvaluator.parse_minutes(exam_session.start_time)
         e_end = BufferRuleEvaluator.parse_minutes(exam_session.end_time)
-
         for unavail in faculty.availabilities:
             if unavail.date == exam_session.exam_date and not unavail.is_available:
                 u_start = BufferRuleEvaluator.parse_minutes(unavail.start_time)
@@ -92,24 +135,23 @@ class EligibilityEngine:
         else:
             checks_passed.append("No conflicting leave or availability restrictions.")
 
-        # 5. Overlapping Exam Duty Check (Simultaneous assignment prevention)
-        has_overlap = False
+        # 5. Exam Duty Buffer Check (Prevents simultaneous and buffer-violating duties)
+        duty_conflicts = cls.get_exam_duty_buffer_conflicts(
+            faculty=faculty,
+            exam_session=exam_session,
+            buffer_minutes=buffer_minutes,
+            current_slot_duties=current_slot_duties,
+            exclude_duty_id=exclude_duty_id
+        )
 
-        # Check in current allocation run session assignments
-        if current_slot_duties:
-            for d in current_slot_duties:
-                if d.get('faculty_id') == faculty.id and d.get('exam_date') == exam_session.exam_date:
-                    d_start = BufferRuleEvaluator.parse_minutes(d.get('start_time'))
-                    d_end = BufferRuleEvaluator.parse_minutes(d.get('end_time'))
-                    if max(e_start, d_start) < min(e_end, d_end):
-                        has_overlap = True
-                        disqualifications.append(
-                            f"Simultaneous slot assignment: Allocated to Room {d.get('room_number')} in this session."
-                        )
-                        break
-
-        if not has_overlap:
-            checks_passed.append("No simultaneous exam duty commitments.")
+        if duty_conflicts:
+            disqualifications.append(
+                f"Exam duty buffer violation: {', '.join(duty_conflicts)}."
+            )
+        else:
+            checks_passed.append(
+                "No conflicting simultaneous or buffer-violating assigned exam duties."
+            )
 
         # 6. Timetable & Buffer Conflict Check (Always evaluate to protect Robotics and regular semester classes)
         tt_result = TimetableConflictEngine.check_faculty_timetable_conflicts(

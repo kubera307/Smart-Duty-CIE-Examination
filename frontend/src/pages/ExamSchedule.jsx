@@ -36,8 +36,13 @@ import {
   BookOpen
 } from 'lucide-react';
 
+const getTodayDate = () => {
+  const today = new Date();
+  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+};
+
 const ExamSchedule = () => {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { academicYears, selectedYear, setSelectedYear, createYear } = useAcademicYear();
   const [cies, setCies] = useState([]);
   const [selectedCycle, setSelectedCycle] = useState('odd'); // 'odd' | 'even'
@@ -67,7 +72,7 @@ const ExamSchedule = () => {
   const [dutySemesterId, setDutySemesterId] = useState('');
   const [dutySubjectId, setDutySubjectId] = useState('');
   const [dutySubjectsList, setDutySubjectsList] = useState([]);
-  const [dutyDate, setDutyDate] = useState('2026-09-10');
+  const [dutyDate, setDutyDate] = useState(getTodayDate);
   const [dutyStartTime, setDutyStartTime] = useState('09:00');
   const [dutyEndTime, setDutyEndTime] = useState('10:00');
   const [dutyRooms, setDutyRooms] = useState([
@@ -501,7 +506,19 @@ const ExamSchedule = () => {
     setIsSavingQuotas(true);
     try {
       const cieId = selectedCieId || (cies.length > 0 ? cies[0].id : 1);
-      await facultyApi.assignByQuotas(cieId, { raw_text: quotaRawText, quotas: quotaMap });
+      let targetSemIds = null;
+      if (selectedSemFilter && selectedSemFilter !== 'odd' && selectedSemFilter !== 'even') {
+        targetSemIds = [parseInt(selectedSemFilter)];
+      } else if (selectedSemFilter === 'odd') {
+        targetSemIds = oddSemIds;
+      } else if (selectedSemFilter === 'even') {
+        targetSemIds = evenSemIds;
+      }
+      await facultyApi.assignByQuotas(cieId, {
+        raw_text: quotaRawText,
+        quotas: quotaMap,
+        semester_ids: targetSemIds
+      });
       showToast('Duty quotas saved and duties allocated to faculties based on quotas!');
       loadSessions(cieId);
       loadDutyQuotas();
@@ -521,7 +538,11 @@ const ExamSchedule = () => {
     }
     setIsAutoAssigningAll(true);
     try {
-      const res = await allocationApi.generate(targetCieId);
+      let targetSemIds = null;
+      if (selectedSemFilter && selectedSemFilter !== 'odd' && selectedSemFilter !== 'even') {
+        targetSemIds = [parseInt(selectedSemFilter)];
+      }
+      const res = await allocationApi.generate(targetCieId, null, targetSemIds);
       const allocated = res.data?.stats?.total_allocated || 0;
       const totalReq = res.data?.stats?.total_required || allocated;
       const pending = res.data?.stats?.total_pending || 0;
@@ -873,7 +894,7 @@ const ExamSchedule = () => {
     if (semesters.length > 0) {
       setDutySemesterId(semesters[0].id.toString());
     }
-    setDutyDate('2026-09-10');
+    setDutyDate(getTodayDate());
     setDutyStartTime('09:00');
     setDutyEndTime('10:00');
     setDutyRooms([
@@ -884,6 +905,15 @@ const ExamSchedule = () => {
     setDutyNotes('');
     setIsCreateDutyModalOpen(true);
   };
+
+  useEffect(() => {
+    if (searchParams.get('action') !== 'create-duty' || semesters.length === 0) return;
+
+    handleOpenCreateDutyModal();
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete('action');
+    setSearchParams(nextParams, { replace: true });
+  }, [searchParams, semesters, setSearchParams]);
 
   const handleAddDutyRoom = () => {
     const nextId = Date.now();
@@ -1737,8 +1767,27 @@ const ExamSchedule = () => {
           </p>
         </div>
 
-        {/* Primary Action: Create Duty */}
+        {/* Primary Actions: Duty Quotas, Auto-Assign, Create Duty */}
         <div className="flex items-center gap-2.5 shrink-0">
+          <button
+            onClick={() => setIsQuotaModalOpen(true)}
+            className="flex items-center gap-1.5 px-3.5 py-2 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs"
+            title="Configure individual faculty duty quotas and seniority protection"
+          >
+            <ShieldCheck className="w-4 h-4 text-purple-600" />
+            <span>Duty Quotas</span>
+          </button>
+
+          <button
+            onClick={handleAutoAssignAllDuties}
+            disabled={isAutoAssigningAll}
+            className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all cursor-pointer disabled:opacity-50"
+            title="Auto-assign examination duties based on configured quotas and timetable"
+          >
+            <Zap className="w-4 h-4" />
+            <span>{isAutoAssigningAll ? 'Assigning...' : 'Auto-Assign'}</span>
+          </button>
+
           <button
             onClick={() => {
               if (selectedCycle === 'even') {
@@ -1867,39 +1916,6 @@ const ExamSchedule = () => {
         </div>
       </div>
 
-      {/* ========================================================================= */}
-      {/* 2.5 UNALLOCATED DUTY SLOTS NOTIFICATION BANNER                            */}
-      {/* ========================================================================= */}
-      {!loading && allDutyRows.length > 0 && allDutyRows.some(r => !r.allocated_faculty || r.status === 'PENDING') && (
-        <div className="bg-amber-50 border border-amber-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-amber-900 shadow-xs">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-amber-100/90 text-amber-700 shrink-0">
-              <AlertTriangle className="w-5 h-5 text-amber-600" />
-            </div>
-            <div>
-              <div className="font-bold text-xs sm:text-sm text-amber-950 flex items-center gap-2">
-                <span>{allDutyRows.filter(r => !r.allocated_faculty || r.status === 'PENDING').length} Duty Slots Unallocated (Pending)</span>
-                <Badge variant="warning">Action Needed</Badge>
-              </div>
-              <p className="text-[11px] text-amber-800 mt-0.5">
-                Faculty members have not been allocated to these rooms yet. Click Auto-Assign to automatically staff 100% of duties with zero timetable clashes.
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={handleAutoAssignAllDuties}
-            disabled={isAutoAssigningAll}
-            className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl shadow-xs flex items-center justify-center gap-2 shrink-0 transition-all cursor-pointer disabled:opacity-50"
-          >
-            {isAutoAssigningAll ? (
-              <RefreshCw className="w-4 h-4 animate-spin" />
-            ) : (
-              <Zap className="w-4 h-4 text-amber-200" />
-            )}
-            <span>{isAutoAssigningAll ? 'Assigning Everyone...' : '⚡ Assign Duties for Everyone Now'}</span>
-          </button>
-        </div>
-      )}
 
       {/* ========================================================================= */}
       {/* 3. TOOLBAR: SEARCH & DYNAMIC SEMESTER FILTERS                             */}

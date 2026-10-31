@@ -11,7 +11,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 def get_faculty_initials(name):
     if not name:
-        return 'TBD'
+        return ''
     mapping = {
         'Dr. Arjun B C': 'ABC',
         'Dr. Swathi H Y': 'HYS',
@@ -616,7 +616,7 @@ class ReportService:
             r_num += 1
             invig_duties = [d for d in s.duties if (d.duty_type or '').lower() != 'squad duty' and d.faculty_id in active_dir_ids and d.faculty and d.faculty.is_active]
             fac_inits = [get_faculty_initials(d.faculty.name) for d in invig_duties if d.faculty]
-            fac_str = ', '.join(fac_inits) if fac_inits else 'TBD'
+            fac_str = ', '.join(fac_inits) if fac_inits else 'Standby'
             rooms_str = ', '.join([r.room_number for r in s.exam_rooms]) or s.room_number or 'AI301'
 
             row_vals = [

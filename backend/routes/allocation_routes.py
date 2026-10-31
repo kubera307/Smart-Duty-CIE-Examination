@@ -1,12 +1,33 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime, date
-from models import db, CIE, ExamSession, ExamRoom, Duty, DutySwapRequest, Faculty, Semester, Subject, TimetableEntry, AllocationExplanation, AuditLog
+from types import SimpleNamespace
+from models import db, CIE, ExamSession, ExamRoom, Duty, DutySwapRequest, Faculty, Semester, AllocationExplanation, AuditLog
 from allocation.engine import AllocationEngine
+from allocation.eligibility import EligibilityEngine
 from allocation.validator import AllocationValidator
-from allocation.buffer_rules import BufferRuleEvaluator
+from allocation.semester_engine import SemesterStatusEngine
+from allocation.timetable_conflicts import TimetableConflictEngine
 
 
 allocation_bp = Blueprint('allocation_bp', __name__)
+
+def get_faculty_timetable_conflicts(faculty, exam_session, all_semesters=None, buffer_minutes=None):
+    semesters = all_semesters or Semester.query.filter_by(is_active=True).all()
+    semester_status = SemesterStatusEngine.classify_semesters_for_slot(
+        slot_sessions=[exam_session],
+        all_active_semesters=semesters
+    )
+    effective_buffer = (
+        AllocationEngine.get_system_buffer_minutes()
+        if buffer_minutes is None
+        else buffer_minutes
+    )
+    return TimetableConflictEngine.check_faculty_timetable_conflicts(
+        faculty=faculty,
+        exam_session=exam_session,
+        regular_semester_ids=semester_status['regular_class_semester_ids'],
+        buffer_minutes=effective_buffer
+    )
 
 @allocation_bp.route('/preview/<int:cie_id>', methods=['GET'])
 def get_allocation_preview(cie_id):
@@ -146,7 +167,8 @@ def manual_duty_override():
         exam_session=duty.exam_session,
         all_active_semesters=all_active_semesters,
         buffer_minutes=buffer_minutes,
-        duty_type=duty.duty_type
+        duty_type=duty.duty_type,
+        exclude_duty_id=duty.id
     )
 
     # If conflicts exist and force_override is not confirmed, halt and return warning
@@ -158,6 +180,15 @@ def manual_duty_override():
             'warnings': validation['warnings'],
             'conflict_details': validation['conflict_details'],
             'message': 'Constraint violation detected. Administrator confirmation with justification required to force override.'
+        }), 409
+    if any('duty buffer violation' in error.lower() for error in validation['errors']):
+        return jsonify({
+            'can_assign': False,
+            'requires_force': False,
+            'errors': validation['errors'],
+            'warnings': validation['warnings'],
+            'conflict_details': validation['conflict_details'],
+            'message': 'Faculty cannot be assigned within the required buffer of another exam duty.'
         }), 409
 
     # Apply override
@@ -237,13 +268,31 @@ def create_or_assign_duty():
     if session_id:
         session = ExamSession.query.get_or_404(session_id)
         room = ExamRoom.query.get(room_id) if room_id else (session.exam_rooms[0] if session.exam_rooms else None)
-        faculty = Faculty.query.get(faculty_id) if faculty_id else None
-
         existing_duty = None
         if room:
             existing_duty = Duty.query.filter_by(exam_session_id=session.id, exam_room_id=room.id).first()
         else:
             existing_duty = Duty.query.filter_by(exam_session_id=session.id).first()
+
+        faculty = Faculty.query.get(faculty_id) if faculty_id else None
+        if faculty:
+            conflicts = get_faculty_timetable_conflicts(faculty, session)['conflicts']
+            if conflicts:
+                return jsonify({
+                    'error': f"{faculty.name} has a timetable conflict in a peer semester.",
+                    'conflict_details': conflicts
+                }), 409
+            duty_conflicts = EligibilityEngine.get_exam_duty_buffer_conflicts(
+                faculty=faculty,
+                exam_session=session,
+                buffer_minutes=AllocationEngine.get_system_buffer_minutes(),
+                exclude_duty_id=existing_duty.id if existing_duty else None
+            )
+            if duty_conflicts:
+                return jsonify({
+                    'error': f"{faculty.name} has another exam duty within the required buffer.",
+                    'conflict_details': duty_conflicts
+                }), 409
 
         if existing_duty:
             existing_duty.faculty_id = faculty.id if faculty else None
@@ -352,6 +401,46 @@ def create_or_assign_duty():
         session.total_students = total_students
         session.required_invigilators = max(session.required_invigilators or 0, len(rooms_input))
 
+    proposed_duties_by_faculty = {}
+    for room_data in rooms_input:
+        assigned_faculty = Faculty.query.get(room_data.get('faculty_id')) if room_data.get('faculty_id') else None
+        if assigned_faculty:
+            conflicts = get_faculty_timetable_conflicts(assigned_faculty, session)['conflicts']
+            if conflicts:
+                return jsonify({
+                    'error': f"{assigned_faculty.name} has a timetable conflict in a peer semester.",
+                    'conflict_details': conflicts
+                }), 409
+            room_number = (room_data.get('room_number') or 'AI301').strip().upper()
+            existing_room = ExamRoom.query.filter_by(
+                exam_session_id=session.id,
+                room_number=room_number
+            ).first()
+            existing_duty = (
+                Duty.query.filter_by(exam_session_id=session.id, exam_room_id=existing_room.id).first()
+                if existing_room else None
+            )
+            current_duties = proposed_duties_by_faculty.setdefault(assigned_faculty.id, [])
+            duty_conflicts = EligibilityEngine.get_exam_duty_buffer_conflicts(
+                faculty=assigned_faculty,
+                exam_session=session,
+                buffer_minutes=AllocationEngine.get_system_buffer_minutes(),
+                current_slot_duties=current_duties,
+                exclude_duty_id=existing_duty.id if existing_duty else None
+            )
+            if duty_conflicts:
+                return jsonify({
+                    'error': f"{assigned_faculty.name} has another exam duty within the required buffer.",
+                    'conflict_details': duty_conflicts
+                }), 409
+            current_duties.append({
+                'faculty_id': assigned_faculty.id,
+                'exam_date': session.exam_date,
+                'start_time': session.start_time,
+                'end_time': session.end_time,
+                'room_number': room_number
+            })
+
     created_duties = []
     for r_data in rooms_input:
         r_num = (r_data.get('room_number') or 'AI301').strip().upper()
@@ -431,10 +520,8 @@ def create_or_assign_duty():
 @allocation_bp.route('/check-faculty-conflicts', methods=['GET'])
 def check_faculty_conflicts():
     """
-    Returns real-time respected timetable conflict and buffer analysis for all faculty
-    for a given date, time window, and target exam semester.
-    - If exam is for 5th or 7th sem: inspects 3rd semester regular classes with 60-min buffer.
-    - If exam is for 3rd sem: inspects 5th and 7th semester regular classes with 60-min buffer.
+    Returns timetable conflict and buffer analysis for all faculty in the
+    regular semesters of the target exam's odd/even cycle.
     """
     date_str = request.args.get('date', '2026-09-10')
     start_time = request.args.get('start_time') or '09:00'
@@ -448,11 +535,8 @@ def check_faculty_conflicts():
     except Exception:
         exam_date = date(2026, 9, 10)
 
-    # Day of week
-    dow_map = {0: 'MON', 1: 'TUE', 2: 'WED', 3: 'THU', 4: 'FRI', 5: 'SAT', 6: 'SUN'}
-    dow = dow_map.get(exam_date.weekday(), 'MON')
-
-    all_semesters = Semester.query.all()
+    dow = TimetableConflictEngine.get_day_of_week(exam_date)
+    all_semesters = Semester.query.filter_by(is_active=True).all()
     exam_sem = None
     if exam_sem_id:
         try:
@@ -465,16 +549,12 @@ def check_faculty_conflicts():
         except Exception:
             pass
 
-    # Determine respected regular class semesters based on exam semester
+    # Protect peer semesters in the same odd/even cycle as the exam semester.
     if exam_sem:
-        if exam_sem.sem_number in [5, 7]:
-            # 5th or 7th sem exam -> respected regular classes are 3rd sem
-            regular_semesters = [s for s in all_semesters if s.sem_number == 3]
-        elif exam_sem.sem_number == 3:
-            # 3rd sem exam -> respected regular classes are 5th and 7th sem
-            regular_semesters = [s for s in all_semesters if s.sem_number in [5, 7]]
-        else:
-            regular_semesters = [s for s in all_semesters if s.id != exam_sem.id]
+        regular_semesters = SemesterStatusEngine.get_regular_class_semesters(
+            [exam_sem],
+            all_semesters
+        )
     else:
         # Default: 3rd semester is the primary regular class semester
         sem3 = Semester.query.filter_by(sem_number=3).first()
@@ -482,37 +562,38 @@ def check_faculty_conflicts():
 
     all_faculty = Faculty.query.all()
 
-    try:
-        e_st_m = BufferRuleEvaluator.parse_minutes(start_time)
-    except Exception:
-        e_st_m = 540
-    try:
-        e_et_m = BufferRuleEvaluator.parse_minutes(end_time)
-    except Exception:
-        e_et_m = 600
-    buf_st = max(0, e_st_m - buffer_minutes)
-    buf_et = min(1440, e_et_m + buffer_minutes)
-
     results = []
     for f in all_faculty:
         is_squad_only = getattr(f, 'only_squad_duty', False) or f.id == 1 or 'Arjun' in (f.name or '')
-        
-        # Check clashes against respected regular class timetables
-        clashes = []
-        for reg_sem in regular_semesters:
-            if not reg_sem:
-                continue
-            entries = TimetableEntry.query.filter_by(faculty_id=f.id, semester_id=reg_sem.id, day_of_week=dow).all()
-            for e in entries:
-                c_st = BufferRuleEvaluator.parse_minutes(e.start_time)
-                c_et = BufferRuleEvaluator.parse_minutes(e.end_time)
-                if max(buf_st, c_st) < min(buf_et, c_et):
-                    sub = db.session.get(Subject, e.subject_id)
-                    sub_code = sub.code if sub else 'Class'
-                    clashes.append(f"{reg_sem.name} {sub_code} ({e.start_time}-{e.end_time})")
+        exam_slot = SimpleNamespace(
+            semester=exam_sem,
+            semester_id=exam_sem.id if exam_sem else None,
+            exam_date=exam_date,
+            start_time=start_time,
+            end_time=end_time
+        )
+        conflict_result = TimetableConflictEngine.check_faculty_timetable_conflicts(
+            faculty=f,
+            exam_session=exam_slot,
+            regular_semester_ids={semester.id for semester in regular_semesters},
+            buffer_minutes=buffer_minutes
+        )
+        clashes = [
+            f"{conflict['semester_name']} {conflict['subject_code']} ({conflict['class_time']})"
+            for conflict in conflict_result['conflicts']
+        ]
 
         has_clash = len(clashes) > 0
-        can_invigilate = f.is_active and f.eligible_for_duty and not is_squad_only and not has_clash
+        duty_conflicts = EligibilityEngine.get_exam_duty_buffer_conflicts(
+            faculty=f,
+            exam_session=exam_slot,
+            buffer_minutes=buffer_minutes
+        )
+        has_exam_duty_conflict = bool(duty_conflicts)
+        can_invigilate = (
+            f.is_active and f.eligible_for_duty and not is_squad_only
+            and not has_clash and not has_exam_duty_conflict
+        )
 
         status_label = 'Available'
         if not f.is_active:
@@ -523,6 +604,8 @@ def check_faculty_conflicts():
             status_label = 'Squad Only'
         elif has_clash:
             status_label = f"Class Clash: {', '.join(clashes)}"
+        elif has_exam_duty_conflict:
+            status_label = f"Exam duty buffer: {', '.join(duty_conflicts)}"
 
         results.append({
             'faculty_id': f.id,
@@ -533,6 +616,8 @@ def check_faculty_conflicts():
             'is_squad_only': is_squad_only,
             'has_3rd_sem_clash': has_clash,
             'has_clash': has_clash,
+            'has_exam_duty_conflict': has_exam_duty_conflict,
+            'exam_duty_conflicts': duty_conflicts,
             'clash_details': clashes,
             'can_invigilate': can_invigilate,
             'status_label': status_label
@@ -574,41 +659,30 @@ def verify_swap_safety(duty, substitute_faculty):
     if not sess:
         return True, "OK"
 
-    # 1. Concurrent duty check
-    concurrent_duty = Duty.query.join(ExamSession).filter(
-        Duty.faculty_id == substitute_faculty.id,
-        Duty.status.in_(['ASSIGNED', 'COMPLETED']),
-        ExamSession.exam_date == sess.exam_date,
-        ExamSession.start_time == sess.start_time
-    ).first()
-    if concurrent_duty:
-        return False, f"{substitute_faculty.name} already has an assigned duty in this session ({sess.start_time}-{sess.end_time})."
+    duty_conflicts = EligibilityEngine.get_exam_duty_buffer_conflicts(
+        faculty=substitute_faculty,
+        exam_session=sess,
+        buffer_minutes=AllocationEngine.get_system_buffer_minutes(),
+        exclude_duty_id=duty.id
+    )
+    if duty_conflicts:
+        return False, (
+            f"{substitute_faculty.name} has another assigned exam duty within "
+            f"the required buffer ({', '.join(duty_conflicts)})."
+        )
 
-    # 2. Timetable lecture clash (+/- 60 min buffer)
-    dow = sess.exam_date.strftime('%a').upper()[:3]
-    try:
-        sh, sm = map(int, sess.start_time.split(':'))
-        eh, em = map(int, sess.end_time.split(':'))
-        exam_start_m = sh * 60 + sm
-        exam_end_m = eh * 60 + em
-        buffer_m = 60
-
-        entries = TimetableEntry.query.filter_by(
-            faculty_id=substitute_faculty.id,
-            day_of_week=dow
-        ).all()
-
-        for te in entries:
-            t_sh, t_sm = map(int, te.start_time.split(':'))
-            t_eh, t_em = map(int, te.end_time.split(':'))
-            lec_start_m = t_sh * 60 + t_sm
-            lec_end_m = t_eh * 60 + t_em
-
-            # Clash if lecture falls within [exam_start - buffer, exam_end + buffer]
-            if not (lec_end_m <= exam_start_m - buffer_m or lec_start_m >= exam_end_m + buffer_m):
-                return False, f"Lecture clash with {te.subject.code if te.subject else 'Class'} ({te.start_time}-{te.end_time}) on {dow} violating 60-min buffer."
-    except Exception as e:
-        print("Buffer check error during swap verification:", e)
+    conflicts = get_faculty_timetable_conflicts(
+        substitute_faculty,
+        sess,
+        buffer_minutes=60
+    )['conflicts']
+    if conflicts:
+        conflict = conflicts[0]
+        return False, (
+            f"Timetable clash with {conflict['semester_name']} "
+            f"{conflict['subject_code']} ({conflict['class_time']}) "
+            "violating 60-min buffer."
+        )
 
     return True, "OK"
 
