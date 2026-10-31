@@ -244,26 +244,34 @@ class AllocationOptimizer:
                             if not csp_cand:
                                 csp_fac = next((f for f in all_faculty if f.id == csp_fac_id), None)
                                 if csp_fac and cie_duties[csp_fac.id] < (csp_fac.max_duty_capacity if csp_fac.max_duty_capacity is not None else 10):
-                                    eval_0 = EligibilityEngine.evaluate_candidate(
+                                    # Never violate timetable buffer: must satisfy 60m buffer from regular classes
+                                    tt_res = TimetableConflictEngine.check_faculty_timetable_conflicts(
                                         faculty=csp_fac,
                                         exam_session=session,
                                         regular_semester_ids=regular_sem_ids,
-                                        current_slot_duties=assigned_duties_by_faculty[csp_fac.id],
-                                        buffer_minutes=0,
-                                        duty_type=duty_type,
-                                        run_assigned_count=cie_duties[csp_fac.id]
+                                        buffer_minutes=60
                                     )
-                                    if eval_0['is_eligible']:
-                                        score_info = CandidateEvaluator.score_candidate(
+                                    if not tt_res['has_conflict']:
+                                        eval_0 = EligibilityEngine.evaluate_candidate(
                                             faculty=csp_fac,
-                                            cie_name=cie.name,
-                                            cumulative_duties=cumulative_duties[csp_fac.id],
-                                            current_cie_duties=cie_duties[csp_fac.id]
+                                            exam_session=session,
+                                            regular_semester_ids=regular_sem_ids,
+                                            current_slot_duties=assigned_duties_by_faculty[csp_fac.id],
+                                            buffer_minutes=0,
+                                            duty_type=duty_type,
+                                            run_assigned_count=cie_duties[csp_fac.id]
                                         )
-                                        csp_cand = {
-                                            'faculty': csp_fac,
-                                            'score_info': score_info
-                                        }
+                                        if eval_0['is_eligible']:
+                                            score_info = CandidateEvaluator.score_candidate(
+                                                faculty=csp_fac,
+                                                cie_name=cie.name,
+                                                cumulative_duties=cumulative_duties[csp_fac.id],
+                                                current_cie_duties=cie_duties[csp_fac.id]
+                                            )
+                                            csp_cand = {
+                                                'faculty': csp_fac,
+                                                'score_info': score_info
+                                            }
                             if csp_cand:
                                 chosen_candidate = csp_cand
                         
@@ -488,19 +496,23 @@ class AllocationOptimizer:
                 if res60['is_eligible']:
                     cands_60.append(fac.id)
                 else:
-                    res0 = EligibilityEngine.evaluate_candidate(
-                        faculty=fac,
-                        exam_session=sess,
-                        regular_semester_ids=regular_sem_ids,
-                        current_slot_duties=None,
-                        buffer_minutes=0,
-                        duty_type='Invigilation',
-                        run_assigned_count=0
-                    )
-                    if res0['is_eligible']:
-                        cands_0.append(fac.id)
+                    # CRITICAL USER RULE: NEVER relax timetable buffer for regular classes (e.g. 5th & 7th sem)!
+                    # If faculty has class at 11:00 AM, NEVER assign duty within 1 hour before/after.
+                    tt_conflict = any('Timetable Conflict' in r for r in res60.get('disqualification_reasons', []))
+                    if not tt_conflict:
+                        res0 = EligibilityEngine.evaluate_candidate(
+                            faculty=fac,
+                            exam_session=sess,
+                            regular_semester_ids=regular_sem_ids,
+                            current_slot_duties=None,
+                            buffer_minutes=0,
+                            duty_type='Invigilation',
+                            run_assigned_count=0
+                        )
+                        if res0['is_eligible']:
+                            cands_0.append(fac.id)
 
-            # Prioritize candidates with full 60m buffer, fallback to 0m buffer (no class overlap)
+            # Prioritize candidates with full 60m buffer
             cands = cands_60 + [fid for fid in cands_0 if fid not in cands_60]
             req_candidates.append(cands)
 

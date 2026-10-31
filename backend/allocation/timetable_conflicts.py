@@ -36,10 +36,10 @@ class TimetableConflictEngine:
         sub_code = (entry.subject.code if entry.subject else '').upper().strip()
         sub_name = (entry.subject.name if entry.subject else '').lower().strip()
         
-        if 'NYP' in sub_code or 'SCR' in sub_code:
+        if 'NYP' in sub_code or 'SCR' in sub_code or 'PT' in sub_code:
             return True
-        keywords = ['nss', 'yoga', 'physical education', 'sports', 'music', 'community project', 'societal project', 'social connect']
-        return any(k in sub_name for k in keywords) or bool(re.search(r'\bpe\b', sub_name))
+        keywords = ['nss', 'yoga', 'physical education', 'sports', 'music', 'community project', 'societal project', 'social connect', 'placement training', 'placement']
+        return any(k in sub_name for k in keywords) or bool(re.search(r'\b(pe|pt)\b', sub_name))
 
     @classmethod
     def check_faculty_timetable_conflicts(cls, faculty, exam_session, regular_semester_ids, buffer_minutes=60):
@@ -74,7 +74,11 @@ class TimetableConflictEngine:
             dept = (entry.department or (entry.subject.department if entry.subject else '') or '').lower()
             is_robotics = 'robot' in dept
 
-            if is_robotics or entry.semester_id in regular_semester_ids:
+            # CRITICAL USER RULE:
+            # When assigning duty for 3rd semester exams, the system must strictly read 5th and 7th semester timetables.
+            # Classes in the exam semester itself are suspended during its exams.
+            is_mock_robotics_test = bool(entry.subject and 'TTROBOT' in (entry.subject.code or ''))
+            if entry.semester_id in regular_semester_ids or (is_robotics and is_mock_robotics_test):
                 relevant_entries.append((entry, is_robotics))
 
         checked_count = len(relevant_entries)

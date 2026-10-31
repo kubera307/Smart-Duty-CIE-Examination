@@ -21,7 +21,8 @@ class EligibilityEngine:
         exam_session,
         buffer_minutes=60,
         current_slot_duties=None,
-        exclude_duty_id=None
+        exclude_duty_id=None,
+        regular_semester_ids=None
     ):
         e_start = BufferRuleEvaluator.parse_minutes(exam_session.start_time)
         e_end = BufferRuleEvaluator.parse_minutes(exam_session.end_time)
@@ -40,6 +41,8 @@ class EligibilityEngine:
 
         # Check existing duties in DB
         sess_id = getattr(exam_session, 'id', None)
+        sess_cie_id = getattr(exam_session, 'cie_id', None)
+        sess_sem_id = getattr(exam_session, 'semester_id', None)
         for duty in faculty.duties:
             if duty.id == exclude_duty_id:
                 continue
@@ -48,6 +51,12 @@ class EligibilityEngine:
             if sess_id is not None and duty.exam_session_id == sess_id:
                 continue
             if duty.exam_session.exam_date != exam_session.exam_date:
+                continue
+            # If duty belongs to a regular class semester for this exam session, skip it
+            if regular_semester_ids and duty.exam_session.semester_id in regular_semester_ids:
+                continue
+            # If duty is in the same CIE but a different semester being allocated independently, skip it
+            if sess_cie_id is not None and duty.exam_session.cie_id == sess_cie_id and sess_sem_id is not None and duty.exam_session.semester_id != sess_sem_id:
                 continue
             d_start = BufferRuleEvaluator.parse_minutes(duty.exam_session.start_time)
             d_end = BufferRuleEvaluator.parse_minutes(duty.exam_session.end_time)
@@ -141,7 +150,8 @@ class EligibilityEngine:
             exam_session=exam_session,
             buffer_minutes=buffer_minutes,
             current_slot_duties=current_slot_duties,
-            exclude_duty_id=exclude_duty_id
+            exclude_duty_id=exclude_duty_id,
+            regular_semester_ids=regular_semester_ids
         )
 
         if duty_conflicts:

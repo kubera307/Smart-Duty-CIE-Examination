@@ -45,27 +45,12 @@ class SemesterStatusEngine:
         """
         all_sem_map = {s.id: s for s in all_active_semesters}
         
-        # The semesters participating in exams during this specific slot / exam date
+        # The semesters participating in exams during this specific slot
         slot_exam_sem_ids = {
             session.semester_id
             for session in slot_sessions
             if session.semester_id in all_sem_map
         }
-
-        # Check all semesters that have exams on this exam date in this CIE cycle
-        if slot_sessions and hasattr(slot_sessions[0], 'exam_date') and hasattr(slot_sessions[0], 'cie_id'):
-            s0 = slot_sessions[0]
-            try:
-                from models.exam import ExamSession
-                date_sessions = ExamSession.query.filter_by(
-                    cie_id=s0.cie_id,
-                    exam_date=s0.exam_date
-                ).all()
-                for ds in date_sessions:
-                    if ds.semester_id in all_sem_map:
-                        slot_exam_sem_ids.add(ds.semester_id)
-            except Exception:
-                pass
 
         if not slot_exam_sem_ids and cie_exam_semester_ids:
             slot_exam_sem_ids = {sid for sid in cie_exam_semester_ids if sid in all_sem_map}
