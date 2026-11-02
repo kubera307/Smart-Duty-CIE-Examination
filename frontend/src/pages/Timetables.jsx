@@ -83,8 +83,10 @@ const Timetables = () => {
   const [semesters, setSemesters] = useState([]);
   const [activeSemId, setActiveSemId] = useState(null);
   const [selectedCycle, setSelectedCycle] = useState('odd'); // 'odd' (3, 5, 7) | 'even' (4, 6)
-  const [selectedBranch, setSelectedBranch] = useState('ALL'); // 'ALL' | 'AI_ML' | 'ROBOTICS'
+  const [selectedBranch, setSelectedBranch] = useState('AI_ML'); // 'AI_ML' | 'ROBOTICS'
   const [entries, setEntries] = useState([]);
+  const [coverageRows, setCoverageRows] = useState([]);
+  const [coverageSaving, setCoverageSaving] = useState(null);
   const [facultyList, setFacultyList] = useState([]);
   const [subjectsList, setSubjectsList] = useState([]);
   const [selectedFacultyFilter, setSelectedFacultyFilter] = useState('');
@@ -100,6 +102,7 @@ const Timetables = () => {
   const [formStartTime, setFormStartTime] = useState('09:30');
   const [formEndTime, setFormEndTime] = useState('10:30');
   const [formRoom, setFormRoom] = useState('AI302');
+  const [formSection, setFormSection] = useState('');
   const [formDepartment, setFormDepartment] = useState('CSE (AI & ML)');
   const [isSubmittingAdd, setIsSubmittingAdd] = useState(false);
 
@@ -113,6 +116,7 @@ const Timetables = () => {
   const [editStartTime, setEditStartTime] = useState('09:30');
   const [editEndTime, setEditEndTime] = useState('10:30');
   const [editRoom, setEditRoom] = useState('AI302');
+  const [editSection, setEditSection] = useState('');
   const [editDepartment, setEditDepartment] = useState('CSE (AI & ML)');
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
 
@@ -175,6 +179,15 @@ const Timetables = () => {
   const visibleSemesters = selectedCycle === 'odd' ? oddSemesters : evenSemesters;
 
   const activeSemester = semesters.find((s) => s.id === activeSemId) || null;
+  const visibleCoverageRows = coverageRows.filter((row) => {
+    const matchesCycle = selectedCycle === 'odd'
+      ? [3, 5, 7].includes(row.sem_number)
+      : [4, 6].includes(row.sem_number);
+    const matchesDepartment = selectedBranch === 'ALL'
+      || (selectedBranch === 'ROBOTICS' && row.department.toLowerCase().includes('robot'))
+      || (selectedBranch === 'AI_ML' && !row.department.toLowerCase().includes('robot'));
+    return matchesCycle && matchesDepartment;
+  });
   const completeSemester = semesters.find((s) => s.id === completeSemId) || activeSemester;
   const displayedSubjects = activeSemester?.sem_number === 3
     ? subjectsList
@@ -258,6 +271,12 @@ const Timetables = () => {
     }
   }, [activeSemId, selectedFacultyFilter, selectedBranch]);
 
+  useEffect(() => {
+    if (activeSemester?.academic_year) {
+      loadCoverage(activeSemester.academic_year);
+    }
+  }, [activeSemester?.academic_year]);
+
   const loadInitialData = async () => {
     try {
       const [semRes, facRes] = await Promise.all([
@@ -313,7 +332,7 @@ const Timetables = () => {
   const loadTimetables = async (semId, branchFilter = selectedBranch) => {
     setLoading(true);
     try {
-      const params = { semester_id: semId };
+      const params = { semester_id: semId, academic_year: activeSemester?.academic_year };
       if (selectedFacultyFilter) params.faculty_id = selectedFacultyFilter;
       if (branchFilter === 'ROBOTICS') {
         params.department = 'Robotics';
@@ -322,10 +341,41 @@ const Timetables = () => {
       }
       const res = await academicApi.getTimetables(params);
       setEntries(res.data || []);
+      if (activeSemester?.academic_year) {
+        await loadCoverage(activeSemester.academic_year);
+      }
     } catch (err) {
       console.error('Error fetching timetables:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadCoverage = async (academicYear) => {
+    try {
+      const res = await academicApi.getTimetableCoverage({ academic_year: academicYear });
+      setCoverageRows(res.data.coverage || []);
+    } catch (err) {
+      console.error('Error fetching timetable coverage:', err);
+      setCoverageRows([]);
+    }
+  };
+
+  const handleCoverageVerification = async (row, isVerified) => {
+    const key = `${row.semester_id}-${row.department}`;
+    setCoverageSaving(key);
+    try {
+      await academicApi.updateTimetableCoverage({
+        academic_year: activeSemester.academic_year,
+        semester_id: row.semester_id,
+        department: row.department,
+        is_verified: isVerified
+      });
+      await loadCoverage(activeSemester.academic_year);
+    } catch (err) {
+      alert(err.response?.data?.error || 'Failed to update timetable coverage verification.');
+    } finally {
+      setCoverageSaving(null);
     }
   };
 
@@ -334,12 +384,17 @@ const Timetables = () => {
     setIsSubmittingAdd(true);
     try {
       const targetDept = formDepartment || (selectedBranch === 'ROBOTICS' ? 'Robotics & Artificial Intelligence' : 'CSE (AI & ML)');
+      const targetAcademicYear = semesters.find(
+        (semester) => semester.id === parseInt(formSemesterId || activeSemId)
+      )?.academic_year || activeSemester?.academic_year;
       const payload = {
         semester_id: parseInt(formSemesterId || activeSemId),
         faculty_id: parseInt(formFacultyId),
         day_of_week: formDay,
         start_time: formStartTime,
         end_time: formEndTime,
+        section: formSection,
+        academic_year: targetAcademicYear,
         room_number: formRoom,
         department: targetDept
       };
@@ -378,6 +433,7 @@ const Timetables = () => {
     setEditEndTime(entry.end_time);
     setEditRoom(entry.room_number || (entry.department?.toLowerCase().includes('robot') ? 'MB210' : 'AI302'));
     setEditDepartment(entry.department || 'CSE (AI & ML)');
+    setEditSection(entry.section || '');
     loadSubjects(entry.semester_id || activeSemId);
     setIsEditModalOpen(true);
   };
@@ -386,12 +442,17 @@ const Timetables = () => {
     e.preventDefault();
     setIsSubmittingEdit(true);
     try {
+      const targetAcademicYear = semesters.find(
+        (semester) => semester.id === parseInt(editSemesterId)
+      )?.academic_year || activeSemester?.academic_year;
       const payload = {
         semester_id: parseInt(editSemesterId),
         faculty_id: parseInt(editFacultyId),
         day_of_week: editDay,
         start_time: editStartTime,
         end_time: editEndTime,
+        section: editSection,
+        academic_year: targetAcademicYear,
         room_number: editRoom,
         department: editDepartment
       };
@@ -764,6 +825,7 @@ const Timetables = () => {
         let end = parts[2];
         let facName = parts[3];
         let room = parts[4] || defaultRoom;
+        let section = parts[5] || '';
 
         parsed.push({
           id: Math.random().toString(36).substring(2, 9),
@@ -771,7 +833,8 @@ const Timetables = () => {
           start_time: start,
           end_time: end,
           faculty_name: facName,
-          room_number: room
+          room_number: room,
+          section
         });
       }
     });
@@ -911,6 +974,7 @@ const Timetables = () => {
                 subject_code: subjCode,
                 subject_name: subjName,
                 department: targetDept,
+                section: typeof cell === 'object' ? (cell?.section || '') : '',
                 room_number: isLab ? (locInfo.lab || 'SA-205') : defaultRoom
               });
             }
@@ -927,6 +991,7 @@ const Timetables = () => {
           end_time: r.end_time,
           faculty_name: r.faculty_name,
           department: targetDept,
+          section: r.section || '',
           room_number: r.room_number || defaultRoom
         }));
       }
@@ -939,6 +1004,7 @@ const Timetables = () => {
 
       const res = await academicApi.bulkCreateTimetableEntries({
         semester_id: parseInt(targetSem),
+        academic_year: targetSemObj?.academic_year,
         department: targetDept,
         replace_existing: completeReplaceExisting,
         entries: entriesToSend
@@ -1367,9 +1433,7 @@ const Timetables = () => {
             <span>
               {selectedBranch === 'ROBOTICS'
                 ? 'Dept of Robotics & Artificial Intelligence'
-                : selectedBranch === 'AI_ML'
-                ? 'Dept of CSE (AI & ML)'
-                : 'All Branches (CSE AI & ML + Robotics & AI)'}
+                : 'Dept of CSE (AI & ML)'}
             </span>
           </div>
           <h1 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
@@ -1440,23 +1504,6 @@ const Timetables = () => {
             <div className="inline-flex p-1 bg-slate-100 rounded-lg border border-slate-200/80 gap-1 flex-wrap">
               <button
                 type="button"
-                onClick={() => setSelectedBranch('ALL')}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${
-                  selectedBranch === 'ALL'
-                    ? 'bg-white text-slate-900 shadow-xs border border-slate-200/60'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                <span>🌐 All Branches</span>
-                <span className={`px-1.5 py-0.2 text-[10px] rounded-full font-mono font-bold ${
-                  selectedBranch === 'ALL' ? 'bg-slate-200 text-slate-800' : 'bg-slate-200/60 text-slate-600'
-                }`}>
-                  Combined
-                </span>
-              </button>
-
-              <button
-                type="button"
                 onClick={() => setSelectedBranch('AI_ML')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-all ${
                   selectedBranch === 'AI_ML'
@@ -1522,7 +1569,7 @@ const Timetables = () => {
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                <span>🍂 Odd Semesters</span>
+                <span>Odd Semesters</span>
                 <span
                   className={`px-1.5 py-0.2 text-[10px] rounded-full font-mono font-bold ${
                     selectedCycle === 'odd' ? 'bg-blue-100 text-blue-800' : 'bg-slate-200 text-slate-600'
@@ -1541,7 +1588,7 @@ const Timetables = () => {
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
-                <span>🌸 Even Semesters</span>
+                <span>Even Semesters</span>
                 <span
                   className={`px-1.5 py-0.2 text-[10px] rounded-full font-mono font-bold ${
                     selectedCycle === 'even' ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-600'
@@ -1613,6 +1660,7 @@ const Timetables = () => {
             </div>
           </div>
         </div>
+
       </div>
 
       {/* ========================================================================= */}
@@ -1851,6 +1899,16 @@ const Timetables = () => {
               />
             </div>
           </div>
+          <div>
+            <label className="block font-semibold text-slate-700 mb-1">Section (optional)</label>
+            <input
+              type="text"
+              value={formSection}
+              onChange={(e) => setFormSection(e.target.value)}
+              className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:border-blue-500"
+              placeholder="e.g. A"
+            />
+          </div>
 
           {/* Quick Duration Preset Selector */}
           <div>
@@ -2037,6 +2095,16 @@ const Timetables = () => {
                 className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:border-blue-500 font-mono text-xs"
               />
             </div>
+          </div>
+          <div>
+            <label className="block font-semibold text-slate-700 mb-1">Section (optional)</label>
+            <input
+              type="text"
+              value={editSection}
+              onChange={(e) => setEditSection(e.target.value)}
+              className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:outline-none focus:border-blue-500"
+              placeholder="e.g. A"
+            />
           </div>
 
           {/* Quick Duration Preset Selector */}

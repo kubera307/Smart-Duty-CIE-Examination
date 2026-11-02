@@ -17,9 +17,13 @@ class SemesterStatusEngine:
         exam_semesters = [semester for semester in exam_semesters if semester]
         exam_semester_ids = {semester.id for semester in exam_semesters}
         exam_cycles = {semester.sem_number % 2 for semester in exam_semesters}
+        exam_semester_numbers = {semester.sem_number for semester in exam_semesters}
 
         if not exam_cycles:
             return [semester for semester in all_semesters if semester.id not in exam_semester_ids]
+
+        if exam_cycles == {1} and exam_semester_numbers.intersection({5, 7}) and 3 not in exam_semester_numbers:
+            return [semester for semester in all_semesters if semester.sem_number == 3]
 
         return [
             semester for semester in all_semesters

@@ -35,24 +35,17 @@ class CIE(db.Model):
             completed = 0
             pending = 0
             for session in self.exam_sessions:
-                needed = (len(session.exam_rooms) if session.exam_rooms else session.required_invigilators) + (session.required_squad or 0)
-                total_required += needed
-                for duty in session.duties:
-                    if duty.status == 'COMPLETED':
-                        completed += 1
-                        allocated += 1
-                    elif duty.status == 'ASSIGNED':
-                        allocated += 1
-                    elif duty.status == 'PENDING':
-                        pending += 1
-            
-            actual_pending = max(pending, total_required - allocated)
+                counts = session.get_allocation_counts()
+                total_required += counts['required']
+                allocated += counts['allocated']
+                completed += counts['completed']
+                pending += counts['pending']
 
             data.update({
                 'total_required': total_required,
                 'allocated': allocated,
                 'completed': completed,
-                'pending': actual_pending
+                'pending': pending
             })
 
         return data
@@ -78,12 +71,92 @@ class ExamSession(db.Model):
     exam_rooms = db.relationship('ExamRoom', backref='exam_session', lazy=True, cascade='all, delete-orphan')
     duties = db.relationship('Duty', backref='exam_session', lazy=True, cascade='all, delete-orphan')
 
+    def get_allocation_counts(self):
+        confirmed_statuses = {'ASSIGNED', 'COMPLETED'}
+
+        def is_confirmed(duty):
+            return (
+                duty.status in confirmed_statuses
+                and duty.faculty_id is not None
+                and duty.faculty
+                and duty.faculty.is_active
+            )
+
+        invigilation_duties = [
+            duty for duty in self.duties
+            if (duty.duty_type or '').lower() != 'squad duty' and is_confirmed(duty)
+        ]
+        required_squad = self.get_required_squad_count()
+        if self.exam_rooms:
+            used_duty_ids = set()
+            room_duties = []
+            for room in self.exam_rooms:
+                duty = next(
+                    (
+                        item for item in invigilation_duties
+                        if item.exam_room_id == room.id and id(item) not in used_duty_ids
+                    ),
+                    None
+                )
+                if not duty:
+                    duty = next(
+                        (
+                            item for item in invigilation_duties
+                            if not item.exam_room_id and id(item) not in used_duty_ids
+                        ),
+                        None
+                    )
+                if duty:
+                    used_duty_ids.add(id(duty))
+                room_duties.append(duty)
+            required_invigilators = len(self.exam_rooms)
+        else:
+            required_invigilators = max(1, self.required_invigilators or 1)
+            room_duties = invigilation_duties[:required_invigilators]
+
+        squad_duties = [
+            duty for duty in self.duties
+            if (duty.duty_type or '').lower() == 'squad duty' and is_confirmed(duty)
+        ]
+        allocated_invigilators = sum(duty is not None for duty in room_duties)
+        allocated_squad = min(required_squad, len(squad_duties))
+        allocated = allocated_invigilators + allocated_squad
+        required = required_invigilators + required_squad
+        completed = sum(duty.status == 'COMPLETED' for duty in room_duties if duty)
+        completed += min(
+            required_squad,
+            sum(duty.status == 'COMPLETED' for duty in squad_duties)
+        )
+        return {
+            'required': required,
+            'required_invigilators': required_invigilators,
+            'required_squad': required_squad,
+            'allocated': allocated,
+            'completed': completed,
+            'pending': required - allocated
+        }
+
+    def get_required_squad_count(self):
+        squad_duty_requested = any(
+            (duty.duty_type or '').lower() == 'squad duty'
+            and duty.status != 'CANCELLED'
+            for duty in self.duties
+        )
+        return max(0, self.required_squad or 0) if squad_duty_requested else 0
+
     def to_dict(self):
-        allocated_duties = [d for d in self.duties if d.status in ('ASSIGNED', 'COMPLETED') and d.faculty_id is not None]
         rooms_list = [r.to_dict() for r in self.exam_rooms]
-        req_invig = len(self.exam_rooms) if self.exam_rooms else self.required_invigilators
-        total_needed = req_invig + (self.required_squad or 0)
-        squad_d = next((d for d in self.duties if d.duty_type == 'Squad Duty' and d.status in ('ASSIGNED', 'COMPLETED') and d.faculty_id is not None), None)
+        allocation_counts = self.get_allocation_counts()
+        total_needed = allocation_counts['required']
+        required_squad = allocation_counts['required_squad']
+        squad_d = next((
+            d for d in self.duties
+            if d.duty_type == 'Squad Duty'
+            and d.status in ('ASSIGNED', 'COMPLETED')
+            and d.faculty_id is not None
+            and d.faculty
+            and d.faculty.is_active
+        ), None)
 
         return {
             'id': self.id,
@@ -102,11 +175,15 @@ class ExamSession(db.Model):
             'room_number': self.room_number or (rooms_list[0]['room_number'] if rooms_list else 'AI301'),
             'rooms_count': len(rooms_list),
             'exam_rooms': rooms_list,
-            'required_invigilators': len(self.exam_rooms) if self.exam_rooms else self.required_invigilators,
-            'required_squad': self.required_squad or 0,
+            'required_invigilators': allocation_counts['required_invigilators'],
+            'required_squad': required_squad,
             'total_required': total_needed,
-            'allocated_count': len(allocated_duties),
-            'status': 'FULLY_ALLOCATED' if len(allocated_duties) >= total_needed else ('PARTIALLY_ALLOCATED' if allocated_duties else 'UNALLOCATED'),
+            'allocated_count': allocation_counts['allocated'],
+            'status': (
+                'FULLY_ALLOCATED' if allocation_counts['pending'] == 0
+                else 'PARTIALLY_ALLOCATED' if allocation_counts['allocated']
+                else 'UNALLOCATED'
+            ),
             'squad_faculty_id': squad_d.faculty_id if squad_d else None,
             'squad_faculty_name': squad_d.faculty.name if (squad_d and squad_d.faculty) else None,
             'squad_faculty_designation': squad_d.faculty.designation if (squad_d and squad_d.faculty) else None,
@@ -285,4 +362,3 @@ class DutySwapRequest(db.Model):
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'duty': self.duty.to_dict() if self.duty else None
         }
-

@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import logging
 from datetime import date, datetime
 from werkzeug.security import generate_password_hash
 
@@ -10,6 +11,9 @@ from models import (
     CIE, ExamSession, ExamRoom, Duty, DutySwapRequest,
     AllocationRun, AllocationExplanation, SystemSettings, AuditLog
 )
+
+logger = logging.getLogger(__name__)
+
 
 def seed_session_with_rooms_and_duties(cie_id, sem_id, sub_id, e_date, st_time, end_time, invig_inits, squad_inits, fac_map):
     sess = ExamSession(
@@ -91,8 +95,18 @@ def seed_database(force_reseed=False):
     - Faculty unavailability / leave records
     - Duty swap requests & Audit log records
     """
-    if not force_reseed and TimetableEntry.query.first() and CIE.query.count() >= 6 and Subject.query.count() >= 30:
-        return
+    if not force_reseed:
+        seed_models = (
+            Faculty, FacultyAvailability, Semester, Subject, TimetableEntry,
+            CIE, ExamSession, ExamRoom, Duty, DutySwapRequest,
+            AllocationRun, AllocationExplanation, SystemSettings, AuditLog
+        )
+        if any(model.query.first() is not None for model in seed_models):
+            logger.info(
+                "Skipping database seed because records already exist; "
+                "startup seeding does not reset existing data."
+            )
+            return
 
     print("Rebuilding complete authentic institutional database (CIE-1, CIE-2, CIE-3 across Odd & Even Semesters)...")
 
@@ -104,6 +118,8 @@ def seed_database(force_reseed=False):
     # 1. System Settings
     settings = [
         SystemSettings(key='buffer_minutes', value='60', description='Mandatory buffer in minutes before and after regular lectures'),
+        SystemSettings(key='duty_spacing_sessions', value='1', description='Minimum examination sessions between duties for the same faculty'),
+        SystemSettings(key='duty_spacing_days', value='1', description='Minimum full calendar days between examination duties'),
         SystemSettings(key='max_duty_capacity', value='15', description='Maximum duty allocation ceiling per faculty member across semester'),
         SystemSettings(key='academic_year', value='2025-26', description='Current active academic year'),
         SystemSettings(key='department', value='Department of Computer Science & Engineering (Artificial Intelligence & Machine Learning)', description='Department Name'),

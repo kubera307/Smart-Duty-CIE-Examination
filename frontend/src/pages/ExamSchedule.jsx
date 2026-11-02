@@ -137,11 +137,11 @@ const ExamSchedule = () => {
   const [wholeAfternoonStart, setWholeAfternoonStart] = useState('14:30');
   const [wholeAfternoonEnd, setWholeAfternoonEnd] = useState('15:30');
   const [semesterTimings, setSemesterTimings] = useState({
-    3: { morning_start: '09:00', morning_end: '10:00', afternoon_start: '14:00', afternoon_end: '15:00' },
+    3: { morning_start: '09:30', morning_end: '11:30', afternoon_start: '14:30', afternoon_end: '16:30' },
     4: { morning_start: '09:00', morning_end: '10:00', afternoon_start: '14:00', afternoon_end: '15:00' },
-    5: { morning_start: '09:00', morning_end: '10:00', afternoon_start: '14:00', afternoon_end: '15:00' },
+    5: { morning_start: '09:30', morning_end: '10:30', afternoon_start: '14:30', afternoon_end: '15:30' },
     6: { morning_start: '11:30', morning_end: '12:30', afternoon_start: '15:30', afternoon_end: '16:30' },
-    7: { morning_start: '11:30', morning_end: '12:30', afternoon_start: '15:30', afternoon_end: '16:30' },
+    7: { morning_start: '12:00', morning_end: '13:00', afternoon_start: '16:00', afternoon_end: '17:00' },
   });
 
   const handleSemTimingChange = (semNum, field, val) => {
@@ -149,10 +149,10 @@ const ExamSchedule = () => {
       ...prev,
       [semNum]: {
         ...(prev[semNum] || {
-          morning_start: semNum === 7 || semNum === 6 ? '11:30' : '09:00',
-          morning_end: semNum === 7 || semNum === 6 ? '12:30' : '10:00',
-          afternoon_start: semNum === 7 || semNum === 6 ? '15:30' : '14:00',
-          afternoon_end: semNum === 7 || semNum === 6 ? '16:30' : '15:00',
+          morning_start: semNum === 7 ? '12:00' : semNum === 6 ? '11:30' : semNum === 5 || semNum === 3 ? '09:30' : '09:00',
+          morning_end: semNum === 7 ? '13:00' : semNum === 6 ? '12:30' : semNum === 5 ? '10:30' : semNum === 3 ? '11:30' : '10:00',
+          afternoon_start: semNum === 7 ? '16:00' : semNum === 6 ? '15:30' : semNum === 5 || semNum === 3 ? '14:30' : '14:00',
+          afternoon_end: semNum === 7 ? '17:00' : semNum === 6 ? '16:30' : semNum === 5 ? '15:30' : semNum === 3 ? '16:30' : '15:00',
         }),
         [field]: val
       }
@@ -645,6 +645,7 @@ const ExamSchedule = () => {
           extraMsg = ` & Allocated ${allocatedCount} duties (${conflictsCount} conflicts)`;
         } catch (allocErr) {
           console.error('Auto-allocation failed:', allocErr);
+          extraMsg = ` Allocation failed: ${allocErr.response?.data?.error || allocErr.message || 'Check allocation results.'}`;
         }
       }
 
@@ -669,6 +670,13 @@ const ExamSchedule = () => {
       loadSessions(selectedCieId);
     }
   }, [selectedCieId]);
+
+  useEffect(() => {
+    const selectedCie = cies.find((cie) => cie.id.toString() === selectedCieId);
+    if (selectedCie?.start_date) {
+      setWholeStartDate(selectedCie.start_date);
+    }
+  }, [selectedCieId, cies]);
 
   // Load subjects when dutySemesterId changes in Create Duty modal
   useEffect(() => {
@@ -3194,7 +3202,7 @@ const ExamSchedule = () => {
                         <th className="p-2.5 min-w-[200px]">
                           <div className="font-bold text-slate-900">5th Sem</div>
                           <div className="text-[10px] font-medium text-slate-500 mt-0.5">
-                            Morning: {semesterTimings[5]?.morning_start || '09:00'} | Afternoon: {semesterTimings[5]?.afternoon_start || '14:00'}
+                            Morning: {semesterTimings[5]?.morning_start || '09:30'} | Afternoon: {semesterTimings[5]?.afternoon_start || '14:30'}
                           </div>
                         </th>
                       )}
@@ -3210,7 +3218,7 @@ const ExamSchedule = () => {
                         <th className="p-2.5 min-w-[200px]">
                           <div className="font-bold text-slate-900">7th Sem</div>
                           <div className="text-[10px] font-medium text-slate-500 mt-0.5">
-                            Morning: {semesterTimings[7]?.morning_start || '11:30'} | Afternoon: {semesterTimings[7]?.afternoon_start || '15:30'}
+                            Morning: {semesterTimings[7]?.morning_start || '12:00'} | Afternoon: {semesterTimings[7]?.afternoon_start || '16:00'}
                           </div>
                         </th>
                       )}
@@ -3301,10 +3309,10 @@ const ExamSchedule = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
               {wholeSelectedSemesters.sort((a, b) => a - b).map((sNum) => {
                 const timings = semesterTimings[sNum] || {
-                  morning_start: sNum === 7 || sNum === 6 ? '11:30' : '09:00',
-                  morning_end: sNum === 7 || sNum === 6 ? '12:30' : '10:00',
-                  afternoon_start: sNum === 7 || sNum === 6 ? '15:30' : '14:00',
-                  afternoon_end: sNum === 7 || sNum === 6 ? '16:30' : '15:00',
+                  morning_start: sNum === 7 ? '12:00' : sNum === 6 ? '11:30' : sNum === 5 || sNum === 3 ? '09:30' : '09:00',
+                  morning_end: sNum === 7 ? '13:00' : sNum === 6 ? '12:30' : sNum === 5 ? '10:30' : sNum === 3 ? '11:30' : '10:00',
+                  afternoon_start: sNum === 7 ? '16:00' : sNum === 6 ? '15:30' : sNum === 5 || sNum === 3 ? '14:30' : '14:00',
+                  afternoon_end: sNum === 7 ? '17:00' : sNum === 6 ? '16:30' : sNum === 5 ? '15:30' : sNum === 3 ? '16:30' : '15:00',
                 };
 
                 return (
@@ -3317,7 +3325,7 @@ const ExamSchedule = () => {
                         </span>
                       </div>
                       <span className="text-[10px] font-semibold px-2.5 py-0.5 rounded-full bg-blue-100/90 text-blue-800">
-                        {sNum === 5 || sNum === 4 ? 'Slot A (09:00 / 14:00)' : sNum === 7 || sNum === 6 ? 'Slot B (11:30 / 15:30)' : 'Slot 1'}
+                        {sNum === 5 ? '09:30 / 14:30' : sNum === 7 ? '12:00 / 16:00' : sNum === 4 ? 'Slot A (09:00 / 14:00)' : sNum === 6 ? 'Slot B (11:30 / 15:30)' : 'Slot 1'}
                       </span>
                     </div>
 

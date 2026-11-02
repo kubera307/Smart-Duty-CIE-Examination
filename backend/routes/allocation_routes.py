@@ -63,6 +63,7 @@ def generate_allocation():
     user_identifier = request.headers.get('X-User', 'Admin')
 
     try:
+        EligibilityEngine.lock_quota_window()
         result = AllocationEngine.generate_cie_allocation(
             cie_id=int(cie_id),
             user_identifier=user_identifier,
@@ -144,18 +145,18 @@ def manual_duty_override():
     """
     Allows controlled manual assignment or reassignment of faculty to a duty.
     Validates timetable conflicts, 1h buffer, capacity, and active status.
-    If conflicts exist, requires explicit 'force_override=true' with confirmation reason.
+    Mandatory eligibility constraints cannot be overridden.
     """
     data = request.get_json() or {}
     duty_id = data.get('duty_id')
     faculty_id = data.get('faculty_id')
-    force_override = bool(data.get('force_override', False))
     override_reason = data.get('override_reason', '').strip()
     user_identifier = request.headers.get('X-User', 'Admin')
 
     if not duty_id or not faculty_id:
         return jsonify({'error': 'duty_id and faculty_id are required'}), 400
 
+    EligibilityEngine.lock_quota_window()
     duty = Duty.query.get_or_404(duty_id)
     faculty = Faculty.query.get_or_404(faculty_id)
     all_active_semesters = Semester.query.filter_by(is_active=True).all()
@@ -171,24 +172,14 @@ def manual_duty_override():
         exclude_duty_id=duty.id
     )
 
-    # If conflicts exist and force_override is not confirmed, halt and return warning
-    if not validation['can_assign'] and not force_override:
-        return jsonify({
-            'can_assign': False,
-            'requires_force': True,
-            'errors': validation['errors'],
-            'warnings': validation['warnings'],
-            'conflict_details': validation['conflict_details'],
-            'message': 'Constraint violation detected. Administrator confirmation with justification required to force override.'
-        }), 409
-    if any('duty buffer violation' in error.lower() for error in validation['errors']):
+    if not validation['can_assign']:
         return jsonify({
             'can_assign': False,
             'requires_force': False,
             'errors': validation['errors'],
             'warnings': validation['warnings'],
             'conflict_details': validation['conflict_details'],
-            'message': 'Faculty cannot be assigned within the required buffer of another exam duty.'
+            'message': 'Mandatory eligibility constraints cannot be overridden.'
         }), 409
 
     # Apply override
@@ -222,12 +213,30 @@ def manual_duty_override():
 @allocation_bp.route('/duty/<int:duty_id>/status', methods=['PUT'])
 def update_duty_status(duty_id):
     """Updates status of a duty (ASSIGNED, COMPLETED, CANCELLED)."""
-    duty = Duty.query.get_or_404(duty_id)
     data = request.get_json() or {}
     new_status = data.get('status', '').strip().upper()
 
     if new_status not in ('ASSIGNED', 'COMPLETED', 'CANCELLED'):
         return jsonify({'error': 'Invalid status. Choose ASSIGNED, COMPLETED, or CANCELLED'}), 400
+
+    if new_status in ('ASSIGNED', 'COMPLETED'):
+        EligibilityEngine.lock_quota_window()
+    duty = Duty.query.get_or_404(duty_id)
+    if new_status in ('ASSIGNED', 'COMPLETED') and duty.faculty_id:
+        validation = AllocationValidator.validate_manual_assignment(
+            faculty=duty.faculty,
+            exam_session=duty.exam_session,
+            all_active_semesters=Semester.query.filter_by(is_active=True).all(),
+            buffer_minutes=AllocationEngine.get_system_buffer_minutes(),
+            duty_type=duty.duty_type,
+            exclude_duty_id=duty.id
+        )
+        if not validation['can_assign']:
+            return jsonify({
+                'error': 'Duty cannot be activated because mandatory assignment constraints are not met.',
+                'errors': validation['errors'],
+                'conflict_details': validation['conflict_details']
+            }), 409
 
     old_status = duty.status
     duty.status = new_status
@@ -266,6 +275,7 @@ def create_or_assign_duty():
 
     # CASE 1: Quick reassign on an existing session/room
     if session_id:
+        EligibilityEngine.lock_quota_window()
         session = ExamSession.query.get_or_404(session_id)
         room = ExamRoom.query.get(room_id) if room_id else (session.exam_rooms[0] if session.exam_rooms else None)
         existing_duty = None
@@ -276,22 +286,19 @@ def create_or_assign_duty():
 
         faculty = Faculty.query.get(faculty_id) if faculty_id else None
         if faculty:
-            conflicts = get_faculty_timetable_conflicts(faculty, session)['conflicts']
-            if conflicts:
-                return jsonify({
-                    'error': f"{faculty.name} has a timetable conflict in a peer semester.",
-                    'conflict_details': conflicts
-                }), 409
-            duty_conflicts = EligibilityEngine.get_exam_duty_buffer_conflicts(
+            validation = AllocationValidator.validate_manual_assignment(
                 faculty=faculty,
                 exam_session=session,
+                all_active_semesters=Semester.query.filter_by(is_active=True).all(),
                 buffer_minutes=AllocationEngine.get_system_buffer_minutes(),
+                duty_type=duty_type,
                 exclude_duty_id=existing_duty.id if existing_duty else None
             )
-            if duty_conflicts:
+            if not validation['can_assign']:
                 return jsonify({
-                    'error': f"{faculty.name} has another exam duty within the required buffer.",
-                    'conflict_details': duty_conflicts
+                    'error': f"{faculty.name} does not meet mandatory assignment constraints.",
+                    'errors': validation['errors'],
+                    'conflict_details': validation['conflict_details']
                 }), 409
 
         if existing_duty:
@@ -341,6 +348,7 @@ def create_or_assign_duty():
 
     if not sem_id or not subj_id or not exam_date_str:
         return jsonify({'error': 'Semester, Subject, and Exam Date are required to create a duty'}), 400
+    EligibilityEngine.lock_quota_window()
 
     # Parse date
     if isinstance(exam_date_str, str):
@@ -402,15 +410,11 @@ def create_or_assign_duty():
         session.required_invigilators = max(session.required_invigilators or 0, len(rooms_input))
 
     proposed_duties_by_faculty = {}
+    proposed_run_duties = []
+    active_semesters = Semester.query.filter_by(is_active=True).all()
     for room_data in rooms_input:
         assigned_faculty = Faculty.query.get(room_data.get('faculty_id')) if room_data.get('faculty_id') else None
         if assigned_faculty:
-            conflicts = get_faculty_timetable_conflicts(assigned_faculty, session)['conflicts']
-            if conflicts:
-                return jsonify({
-                    'error': f"{assigned_faculty.name} has a timetable conflict in a peer semester.",
-                    'conflict_details': conflicts
-                }), 409
             room_number = (room_data.get('room_number') or 'AI301').strip().upper()
             existing_room = ExamRoom.query.filter_by(
                 exam_session_id=session.id,
@@ -421,25 +425,35 @@ def create_or_assign_duty():
                 if existing_room else None
             )
             current_duties = proposed_duties_by_faculty.setdefault(assigned_faculty.id, [])
-            duty_conflicts = EligibilityEngine.get_exam_duty_buffer_conflicts(
+            validation = AllocationValidator.validate_manual_assignment(
                 faculty=assigned_faculty,
                 exam_session=session,
+                all_active_semesters=active_semesters,
                 buffer_minutes=AllocationEngine.get_system_buffer_minutes(),
+                duty_type=room_data.get('duty_type') or duty_type or 'Invigilation',
                 current_slot_duties=current_duties,
-                exclude_duty_id=existing_duty.id if existing_duty else None
+                exclude_duty_id=existing_duty.id if existing_duty else None,
+                run_duties=proposed_run_duties
             )
-            if duty_conflicts:
+            if not validation['can_assign']:
                 return jsonify({
-                    'error': f"{assigned_faculty.name} has another exam duty within the required buffer.",
-                    'conflict_details': duty_conflicts
+                    'error': f"{assigned_faculty.name} does not meet mandatory assignment constraints.",
+                    'errors': validation['errors'],
+                    'conflict_details': validation['conflict_details']
                 }), 409
-            current_duties.append({
+            proposed_slot_duty = {
                 'faculty_id': assigned_faculty.id,
                 'exam_date': session.exam_date,
                 'start_time': session.start_time,
                 'end_time': session.end_time,
-                'room_number': room_number
-            })
+                'room_number': room_number,
+                'cie_id': session.cie_id,
+                'semester_id': session.semester_id,
+                'sem_number': session.semester.sem_number if session.semester else None,
+                'academic_year': session.cie.academic_year if session.cie else None
+            }
+            current_duties.append(proposed_slot_duty)
+            proposed_run_duties.append(proposed_slot_duty)
 
     created_duties = []
     for r_data in rooms_input:
@@ -475,9 +489,8 @@ def create_or_assign_duty():
 
         existing_duty = Duty.query.filter_by(exam_session_id=session.id, exam_room_id=room.id).first()
         if existing_duty:
-            if r_faculty:
-                existing_duty.faculty_id = r_faculty.id
-                existing_duty.status = 'ASSIGNED'
+            existing_duty.faculty_id = r_faculty.id if r_faculty else None
+            existing_duty.status = 'ASSIGNED' if r_faculty else 'PENDING'
             existing_duty.duty_type = r_duty_type
             existing_duty.is_manual_override = True
             existing_duty.override_reason = override_reason
@@ -587,7 +600,7 @@ def check_faculty_conflicts():
         duty_conflicts = EligibilityEngine.get_exam_duty_buffer_conflicts(
             faculty=f,
             exam_session=exam_slot,
-            buffer_minutes=buffer_minutes
+            buffer_minutes=30
         )
         has_exam_duty_conflict = bool(duty_conflicts)
         can_invigilate = (
@@ -649,42 +662,20 @@ def verify_swap_safety(duty, substitute_faculty):
     4. No regular class lecture buffer clash (+/- 60 min)
     5. Remaining duty capacity
     """
-    if not substitute_faculty.is_active or not substitute_faculty.eligible_for_duty:
-        return False, f"{substitute_faculty.name} is currently inactive or marked ineligible for duties."
-
-    if (duty.duty_type or 'Invigilation') != 'Squad Duty' and substitute_faculty.only_squad_duty:
-        return False, f"{substitute_faculty.name} is designated for Squad Duty only."
-
     sess = duty.exam_session
     if not sess:
         return True, "OK"
-
-    duty_conflicts = EligibilityEngine.get_exam_duty_buffer_conflicts(
+    validation = AllocationValidator.validate_manual_assignment(
         faculty=substitute_faculty,
         exam_session=sess,
+        all_active_semesters=Semester.query.filter_by(is_active=True).all(),
         buffer_minutes=AllocationEngine.get_system_buffer_minutes(),
+        duty_type=duty.duty_type or 'Invigilation',
         exclude_duty_id=duty.id
     )
-    if duty_conflicts:
-        return False, (
-            f"{substitute_faculty.name} has another assigned exam duty within "
-            f"the required buffer ({', '.join(duty_conflicts)})."
-        )
-
-    conflicts = get_faculty_timetable_conflicts(
-        substitute_faculty,
-        sess,
-        buffer_minutes=60
-    )['conflicts']
-    if conflicts:
-        conflict = conflicts[0]
-        return False, (
-            f"Timetable clash with {conflict['semester_name']} "
-            f"{conflict['subject_code']} ({conflict['class_time']}) "
-            "violating 60-min buffer."
-        )
-
-    return True, "OK"
+    if not validation['can_assign']:
+        return False, '; '.join(validation['errors'])
+    return True, 'OK'
 
 
 @allocation_bp.route('/swap-requests', methods=['GET'])
@@ -744,6 +735,7 @@ def create_swap_request():
 @allocation_bp.route('/swap-requests/<int:swap_id>/approve', methods=['POST'])
 def approve_swap_request(swap_id):
     """Approves a swap request and reassigns the duty to the substitute faculty."""
+    EligibilityEngine.lock_quota_window()
     swap = DutySwapRequest.query.get_or_404(swap_id)
     if swap.status != 'PENDING':
         return jsonify({'error': f'Swap request is already {swap.status}'}), 400
@@ -868,6 +860,7 @@ def get_emergency_standby(duty_id):
 @allocation_bp.route('/duties/<int:duty_id>/emergency-reassign', methods=['POST'])
 def emergency_reassign_duty(duty_id):
     """1-tap emergency replacement of an absent invigilator."""
+    EligibilityEngine.lock_quota_window()
     duty = Duty.query.get_or_404(duty_id)
     data = request.get_json() or {}
     new_faculty_id = data.get('faculty_id')

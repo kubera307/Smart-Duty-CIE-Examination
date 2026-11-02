@@ -5,6 +5,8 @@ from models import (
     AllocationRun, AllocationExplanation, SystemSettings, AuditLog
 )
 from .optimizer import AllocationOptimizer
+from .timetable_conflicts import TimetableConflictEngine
+from .eligibility import EligibilityEngine
 
 def is_one_credit_session(sess):
     sub = sess.subject
@@ -59,6 +61,15 @@ class AllocationEngine:
         # Strictly exclude 1-credit subjects unless user explicitly selects include_one_credit
         if not include_one_credit:
             sessions = [s for s in sessions if not is_one_credit_session(s)]
+        active_semesters = Semester.query.filter_by(is_active=True).all()
+        coverage_missing = sorted({
+            scope
+            for session in sessions
+            for scope in TimetableConflictEngine.get_missing_coverage(
+                session,
+                active_semesters
+            )
+        })
 
         total_required = sum(
             (len(s.exam_rooms) if s.exam_rooms else s.required_invigilators) + ((s.required_squad or 0) if include_squad else 0)
@@ -99,6 +110,8 @@ class AllocationEngine:
             'excluded_faculty_count': len(excluded_faculty),
             'excluded_faculty_names': [f.name for f in excluded_faculty],
             'buffer_minutes': cls.get_system_buffer_minutes(),
+            'timetable_coverage_incomplete': bool(coverage_missing),
+            'missing_timetable_coverage': coverage_missing,
             'include_one_credit': include_one_credit,
             'include_squad': include_squad
         }
@@ -189,6 +202,7 @@ class AllocationEngine:
             db.session.expire_all()
 
         # Refresh all_faculty cleanly after commit
+        EligibilityEngine.lock_quota_window()
         all_faculty = Faculty.query.all()
 
         # Execute optimization engine
@@ -198,7 +212,11 @@ class AllocationEngine:
             all_faculty=all_faculty,
             all_semesters=all_semesters,
             buffer_minutes=buffer_minutes,
-            include_squad=include_squad
+            include_squad=include_squad,
+            quota_scope_session_ids=(
+                {session.id for session in exam_sessions}
+                if target_sem_ids else None
+            )
         )
 
         # Persist new duties and explanations

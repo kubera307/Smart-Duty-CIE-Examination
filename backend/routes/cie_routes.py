@@ -1,10 +1,42 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime, date, timedelta
 from collections import defaultdict
-from models import db, CIE, ExamSession, ExamRoom, Subject, Semester, AuditLog, Duty, Faculty, TimetableEntry, SystemSettings
+from models import (
+    db, CIE, ExamSession, ExamRoom, Subject, Semester, AuditLog, Duty, Faculty,
+    TimetableEntry, SystemSettings, DutySwapRequest, AllocationExplanation
+)
 from allocation.buffer_rules import BufferRuleEvaluator
+from allocation.eligibility import EligibilityEngine
+from allocation.validator import AllocationValidator
+from allocation.timetable_conflicts import normalize_academic_year
 
 cie_bp = Blueprint('cie_bp', __name__)
+
+
+def _mismatched_academic_years(cie, semesters):
+    cie_year = normalize_academic_year(cie.academic_year)
+    return [
+        semester
+        for semester in semesters
+        if cie_year
+        and normalize_academic_year(semester.academic_year)
+        and normalize_academic_year(semester.academic_year) != cie_year
+    ]
+
+
+def _delete_duties(query):
+    duty_ids = [row[0] for row in query.with_entities(Duty.id).all()]
+    if not duty_ids:
+        return 0
+
+    DutySwapRequest.query.filter(DutySwapRequest.duty_id.in_(duty_ids)).delete(
+        synchronize_session=False
+    )
+    AllocationExplanation.query.filter(AllocationExplanation.duty_id.in_(duty_ids)).delete(
+        synchronize_session=False
+    )
+    return query.delete(synchronize_session=False)
+
 
 @cie_bp.route('', methods=['GET'])
 def get_cies():
@@ -149,6 +181,15 @@ def create_session(cie_id):
     except Exception:
         return jsonify({'error': 'Invalid date format. Expected YYYY-MM-DD'}), 400
 
+    semester = Semester.query.get_or_404(int(data['semester_id']))
+    mismatched_semesters = _mismatched_academic_years(cie, [semester])
+    if mismatched_semesters:
+        return jsonify({
+            'error': 'The selected semester academic year does not match the CIE academic year.',
+            'cie_academic_year': cie.academic_year,
+            'semester_academic_year': semester.academic_year
+        }), 400
+
     rooms_data = data.get('rooms', [])
     total_students = int(data.get('total_students') or 60)
     primary_room = rooms_data[0].get('room_number', 'AI301') if rooms_data else data.get('room_number', 'AI301')
@@ -262,7 +303,7 @@ def auto_split_rooms():
 def setup_5th_7th_sessions(cie_id):
     """
     Sets up the official CIE-1 exam sessions for 5th & 7th Semesters with room splitting:
-    - 5th Semester (09:00 - 10:00 AM): 60 students split into AI301 (1-29) and AI302 (30-60).
+    - 5th Semester (09:30 - 10:30 AM): 60 students split into AI301 (1-29) and AI302 (30-60).
     - 7th Semester (12:00 - 01:00 PM): 60 students split into AI301 (1-30) and AI302 (31-60).
     """
     cie = CIE.query.get_or_404(cie_id)
@@ -279,7 +320,7 @@ def setup_5th_7th_sessions(cie_id):
     # (sem_id, subj_code, date, start_time, end_time, total_students, rooms_list)
     schedule = [
         # 10 September
-        (sem5.id, sub5_map.get('24AI501'), date(2026, 9, 10), '09:00', '10:00', 60, [
+        (sem5.id, sub5_map.get('24AI501'), date(2026, 9, 10), '09:30', '10:30', 60, [
             ('AI301', 30, 1, 29),
             ('AI302', 30, 30, 60),
         ]),
@@ -288,7 +329,7 @@ def setup_5th_7th_sessions(cie_id):
             ('AI302', 30, 30, 60),
         ]),
         # 11 September
-        (sem5.id, sub5_map.get('24AI502'), date(2026, 9, 11), '09:00', '10:00', 60, [
+        (sem5.id, sub5_map.get('24AI502'), date(2026, 9, 11), '09:30', '10:30', 60, [
             ('AI301', 30, 1, 29),
             ('AI302', 30, 30, 60),
         ]),
@@ -297,7 +338,7 @@ def setup_5th_7th_sessions(cie_id):
             ('AI302', 30, 30, 60),
         ]),
         # 12 September
-        (sem5.id, sub5_map.get('24AI503'), date(2026, 9, 12), '09:00', '10:00', 60, [
+        (sem5.id, sub5_map.get('24AI503'), date(2026, 9, 12), '09:30', '10:30', 60, [
             ('AI301', 30, 1, 29),
             ('AI302', 30, 30, 60),
         ]),
@@ -412,6 +453,77 @@ def setup_all_semesters_sessions(cie_id):
     if not sem_map and not custom_sessions:
         return jsonify({'error': 'No valid semesters selected for schedule creation'}), 400
 
+    selected_semester_ids = {semester.id for semester in sem_map.values()}
+    if custom_sessions:
+        for session_data in custom_sessions:
+            raw_semester_id = session_data.get('semester_id')
+            if raw_semester_id is None:
+                continue
+            try:
+                selected_semester_ids.add(int(raw_semester_id))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'Custom sessions contain an invalid semester_id.'}), 400
+
+    selected_semesters = Semester.query.filter(
+        Semester.id.in_(selected_semester_ids)
+    ).all() if selected_semester_ids else []
+    mismatched_semesters = _mismatched_academic_years(cie, selected_semesters)
+    if mismatched_semesters:
+        return jsonify({
+            'error': 'Schedule creation stopped because selected semesters do not match the CIE academic year. Existing sessions were not changed.',
+            'cie_academic_year': cie.academic_year,
+            'mismatched_semesters': [
+                {
+                    'id': semester.id,
+                    'name': semester.name,
+                    'academic_year': semester.academic_year
+                }
+                for semester in mismatched_semesters
+            ]
+        }), 400
+
+    if custom_sessions:
+        configured_semester_ids = {
+            int(session_data['semester_id'])
+            for session_data in custom_sessions
+            if session_data.get('semester_id') is not None
+        }
+        missing_semesters = [
+            semester.name
+            for semester in sem_map.values()
+            if semester.id not in configured_semester_ids
+        ]
+        if missing_semesters:
+            return jsonify({
+                'error': 'The custom schedule has no examination sessions for selected semesters.',
+                'missing_semesters': missing_semesters
+            }), 400
+    else:
+        required_codes = {
+            3: [('25MAAI301', '24MAAI301'), ('25AI302', '24AI302'), ('25AI303', '24AI303'),
+                ('25AI304', '24AI304'), ('25AI305', '24AI305'), ('25AIL306', '25AI308A', '24AI306I')],
+            4: [('24AI401',), ('24AI402',), ('24AI403',), ('24AI404',), ('24AI405A',), ('24AI408',)],
+            5: [('24AI501',), ('24AI502',), ('24AI503',), ('24AI504',), ('24AI505A',), ('24AI508',)],
+            6: [('23AI601',), ('23AI602',), ('23AI603',), ('23AI604',), ('23AI605A',)],
+            7: [('23AI701',), ('23AI702',), ('23AI703',), ('23AI704D',), ('23OEAI75x',)]
+        }
+        missing_subjects = []
+        for sem_num, semester in sem_map.items():
+            available_codes = {
+                subject.code
+                for subject in Subject.query.filter_by(semester_id=semester.id).all()
+            }
+            missing_subjects.extend(
+                f'{sem_num}th semester: {" / ".join(code_options)}'
+                for code_options in required_codes[sem_num]
+                if not available_codes.intersection(code_options)
+            )
+        if missing_subjects:
+            return jsonify({
+                'error': 'Schedule creation stopped because configured curriculum subjects are missing. Existing sessions were not changed.',
+                'missing_subjects': missing_subjects
+            }), 400
+
     # Apply faculty duty quotas if provided by admin during duty creation
     faculty_quotas = data.get('faculty_quotas')
     faculty_quotas_text = data.get('faculty_quotas_text')
@@ -464,7 +576,7 @@ def setup_all_semesters_sessions(cie_id):
         old_sessions = ExamSession.query.filter_by(cie_id=cie.id).all()
         old_session_ids = [s.id for s in old_sessions]
         if old_session_ids:
-            Duty.query.filter(Duty.exam_session_id.in_(old_session_ids)).delete(synchronize_session=False)
+            _delete_duties(Duty.query.filter(Duty.exam_session_id.in_(old_session_ids)))
             ExamRoom.query.filter(ExamRoom.exam_session_id.in_(old_session_ids)).delete(synchronize_session=False)
         for s in old_sessions:
             db.session.delete(s)
@@ -479,7 +591,7 @@ def setup_all_semesters_sessions(cie_id):
             ).all()
             old_session_ids = [s.id for s in old_sessions]
             if old_session_ids:
-                Duty.query.filter(Duty.exam_session_id.in_(old_session_ids)).delete(synchronize_session=False)
+                _delete_duties(Duty.query.filter(Duty.exam_session_id.in_(old_session_ids)))
                 ExamRoom.query.filter(ExamRoom.exam_session_id.in_(old_session_ids)).delete(synchronize_session=False)
             for s in old_sessions:
                 db.session.delete(s)
@@ -488,7 +600,7 @@ def setup_all_semesters_sessions(cie_id):
     # Clean only truly orphaned duty or room records (never delete valid duties of other semesters)
     valid_session_ids = [s.id for s in ExamSession.query.all()]
     if valid_session_ids:
-        Duty.query.filter(~Duty.exam_session_id.in_(valid_session_ids)).delete(synchronize_session=False)
+        _delete_duties(Duty.query.filter(~Duty.exam_session_id.in_(valid_session_ids)))
         ExamRoom.query.filter(~ExamRoom.exam_session_id.in_(valid_session_ids)).delete(synchronize_session=False)
     db.session.flush()
 
@@ -558,7 +670,6 @@ def setup_all_semesters_sessions(cie_id):
         # Master schedule tuples: (sem_num, subject_obj, date, start_time, end_time)
         master_plan = []
 
-        is_both_5_and_7 = (5 in sem_map and 7 in sem_map)
         is_both_4_and_6 = (4 in sem_map and 6 in sem_map)
 
         semester_timings = data.get('semester_timings', {})
@@ -572,16 +683,10 @@ def setup_all_semesters_sessions(cie_id):
             return fallback_st.strip(), fallback_et.strip()
 
         # Standard slot timings for Odd Semesters (5th & 7th)
-        if is_both_5_and_7:
-            def_s5_m_st, def_s5_m_et = '09:00', '10:00'
-            def_s7_m_st, def_s7_m_et = '11:30', '12:30'
-            def_s5_a_st, def_s5_a_et = '14:00', '15:00'
-            def_s7_a_st, def_s7_a_et = '15:30', '16:30'
-        else:
-            def_s5_m_st, def_s5_m_et = morning_start, morning_end
-            def_s7_m_st, def_s7_m_et = morning_start, morning_end
-            def_s5_a_st, def_s5_a_et = afternoon_start, afternoon_end
-            def_s7_a_st, def_s7_a_et = afternoon_start, afternoon_end
+        def_s5_m_st, def_s5_m_et = '09:30', '10:30'
+        def_s7_m_st, def_s7_m_et = '12:00', '13:00'
+        def_s5_a_st, def_s5_a_et = '14:30', '15:30'
+        def_s7_a_st, def_s7_a_et = '16:00', '17:00'
 
         # Standard slot timings for Even Semesters (4th & 6th)
         if is_both_4_and_6:
@@ -768,78 +873,29 @@ def find_conflict_free_faculty_for_session(session, exclude_faculty_ids=None):
     if exclude_faculty_ids is None:
         exclude_faculty_ids = set()
 
-    sem = session.semester
-    all_semesters = Semester.query.all()
-    if sem:
-        if sem.sem_number in [5, 7]:
-            regular_semesters = [s for s in all_semesters if s.sem_number == 3]
-        elif sem.sem_number == 3:
-            regular_semesters = [s for s in all_semesters if s.sem_number in [5, 7]]
-        else:
-            regular_semesters = [s for s in all_semesters if s.id != sem.id]
-    else:
-        sem3 = Semester.query.filter_by(sem_number=3).first()
-        regular_semesters = [sem3] if sem3 else []
-
-    dow_map = {0: 'MON', 1: 'TUE', 2: 'WED', 3: 'THU', 4: 'FRI', 5: 'SAT', 6: 'SUN'}
-    dow = dow_map.get(session.exam_date.weekday(), 'MON') if session.exam_date else 'MON'
-
-    st_m = BufferRuleEvaluator.parse_minutes(session.start_time)
-    et_m = BufferRuleEvaluator.parse_minutes(session.end_time)
-    buf_st = max(0, st_m - 60)
-    buf_et = min(1440, et_m + 60)
-
     all_fac = Faculty.query.all()
+    all_semesters = Semester.query.filter_by(is_active=True).all()
     candidates = []
 
     for f in all_fac:
-        is_squad = getattr(f, 'only_squad_duty', False) or f.id == 1 or 'Arjun' in (f.name or '')
-        if not f.is_active or not f.eligible_for_duty or is_squad:
-            continue
         if f.id in exclude_faculty_ids:
             continue
+        validation = AllocationValidator.validate_manual_assignment(
+            faculty=f,
+            exam_session=session,
+            all_active_semesters=all_semesters,
+            buffer_minutes=60,
+            duty_type='Invigilation'
+        )
+        if validation['can_assign']:
+            workload = EligibilityEngine.get_quota_usage(
+                f,
+                session,
+                EligibilityEngine.get_quota_period()
+            )
+            candidates.append((f, workload))
 
-        has_clash = False
-        for reg_sem in regular_semesters:
-            if not reg_sem:
-                continue
-            entries = TimetableEntry.query.filter_by(faculty_id=f.id, semester_id=reg_sem.id, day_of_week=dow).all()
-            for e in entries:
-                c_st = BufferRuleEvaluator.parse_minutes(e.start_time)
-                c_et = BufferRuleEvaluator.parse_minutes(e.end_time)
-                if max(buf_st, c_st) < min(buf_et, c_et):
-                    has_clash = True
-                    break
-            if has_clash:
-                break
-
-        if not has_clash:
-            # Check concurrent exam duties on the same date to avoid double-booking
-            concurrent_duties = Duty.query.join(ExamSession).filter(
-                Duty.faculty_id == f.id,
-                Duty.status != 'CANCELLED',
-                ExamSession.exam_date == session.exam_date,
-                ExamSession.id != session.id
-            ).all()
-            has_concurrent_clash = False
-            for cd in concurrent_duties:
-                cs = cd.exam_session
-                if cs and cs.start_time and cs.end_time:
-                    cs_st = BufferRuleEvaluator.parse_minutes(cs.start_time)
-                    cs_et = BufferRuleEvaluator.parse_minutes(cs.end_time)
-                    if max(st_m, cs_st) < min(et_m, cs_et):
-                        has_concurrent_clash = True
-                        break
-            if has_concurrent_clash:
-                continue
-
-            assigned_count = Duty.query.filter_by(faculty_id=f.id).filter(Duty.status != 'CANCELLED').count()
-            target = f.max_duty_capacity if f.max_duty_capacity is not None else 5
-            is_over_quota = (assigned_count >= target)
-            diff = assigned_count - target
-            candidates.append((f, is_over_quota, diff, assigned_count))
-
-    candidates.sort(key=lambda x: (x[1], x[2], x[3]))
+    candidates.sort(key=lambda candidate: candidate[1])
     return [c[0] for c in candidates]
 
 
@@ -862,6 +918,7 @@ def update_session(session_id):
     Allows editing date, time, subject, semester, room details, and assigned faculty.
     Automatically verifies against the respected regular timetable and assigns conflict-free faculty.
     """
+    EligibilityEngine.lock_quota_window()
     session = ExamSession.query.get_or_404(session_id)
     data = request.get_json() or {}
 
@@ -905,6 +962,7 @@ def update_session(session_id):
     auto_assign_requested = data.get('auto_assign', False)
     reassign_conflicts = data.get('auto_reassign_conflicts', True)
     assigned_in_session = set()
+    run_duties = []
 
     if rooms_data and isinstance(rooms_data, list):
         session.required_invigilators = len(rooms_data)
@@ -940,9 +998,6 @@ def update_session(session_id):
                 if cand_list:
                     fac_id_int = cand_list[0].id
 
-            if fac_id_int:
-                assigned_in_session.add(fac_id_int)
-
             if r_id and r_id in existing_room_map:
                 room_obj = existing_room_map[r_id]
                 room_obj.room_number = r_num
@@ -966,6 +1021,70 @@ def update_session(session_id):
 
             # Update or create Duty for this room
             duty = Duty.query.filter_by(exam_session_id=session.id, exam_room_id=room_obj.id).first()
+            if fac_id_int:
+                candidate_faculty = db.session.get(Faculty, fac_id_int)
+                if not candidate_faculty:
+                    return jsonify({'error': f'Faculty {fac_id_int} was not found.'}), 404
+                db.session.expire(candidate_faculty, ['duties'])
+                validation = AllocationValidator.validate_manual_assignment(
+                    faculty=candidate_faculty,
+                    exam_session=session,
+                    all_active_semesters=Semester.query.filter_by(is_active=True).all(),
+                    buffer_minutes=60,
+                    duty_type=duty_type,
+                    exclude_duty_id=duty.id if duty else None,
+                    current_slot_duties=run_duties,
+                )
+                if not validation['can_assign']:
+                    if auto_assign_requested or reassign_conflicts:
+                        alternatives = find_conflict_free_faculty_for_session(
+                            session,
+                            exclude_faculty_ids=assigned_in_session | {fac_id_int}
+                        )
+                        if alternatives:
+                            fac_id_int = alternatives[0].id
+                            candidate_faculty = alternatives[0]
+                            validation = AllocationValidator.validate_manual_assignment(
+                                faculty=candidate_faculty,
+                                exam_session=session,
+                                all_active_semesters=Semester.query.filter_by(is_active=True).all(),
+                                buffer_minutes=60,
+                                duty_type=duty_type,
+                                exclude_duty_id=duty.id if duty else None,
+                                current_slot_duties=run_duties
+                            )
+                            if not validation['can_assign']:
+                                return jsonify({
+                                    'error': f"{candidate_faculty.name} does not meet mandatory assignment constraints.",
+                                    'errors': validation['errors'],
+                                    'conflict_details': validation['conflict_details']
+                                }), 409
+                        else:
+                            return jsonify({
+                                'error': f"{candidate_faculty.name} does not meet mandatory assignment constraints.",
+                                'errors': validation['errors'],
+                                'conflict_details': validation['conflict_details']
+                            }), 409
+                    else:
+                        return jsonify({
+                            'error': f"{candidate_faculty.name} does not meet mandatory assignment constraints.",
+                            'errors': validation['errors'],
+                            'conflict_details': validation['conflict_details']
+                        }), 409
+
+                if fac_id_int:
+                    assigned_in_session.add(fac_id_int)
+                    run_duties.append({
+                        'faculty_id': fac_id_int,
+                        'exam_date': session.exam_date,
+                        'start_time': session.start_time,
+                        'end_time': session.end_time,
+                        'cie_id': session.cie_id,
+                        'semester_id': session.semester_id,
+                        'sem_number': session.semester.sem_number if session.semester else None,
+                        'academic_year': session.cie.academic_year if session.cie else None
+                    })
+
             if not duty:
                 duty = Duty(
                     exam_session_id=session.id,
@@ -986,13 +1105,34 @@ def update_session(session_id):
         # Delete rooms that were removed
         for r_id, r_obj in existing_room_map.items():
             if r_id not in updated_room_ids:
-                Duty.query.filter_by(exam_session_id=session.id, exam_room_id=r_id).delete()
+                _delete_duties(
+                    Duty.query.filter_by(exam_session_id=session.id, exam_room_id=r_id)
+                )
                 db.session.delete(r_obj)
 
     # Squad duty update if provided
     squad_fac_id = data.get('squad_faculty_id')
     if squad_fac_id is not None or 'required_squad' in data:
         squad_duty = Duty.query.filter_by(exam_session_id=session.id, duty_type='Squad Duty').first()
+        if squad_fac_id:
+            squad_faculty = db.session.get(Faculty, int(squad_fac_id))
+            if not squad_faculty:
+                return jsonify({'error': f'Faculty {squad_fac_id} was not found.'}), 404
+            validation = AllocationValidator.validate_manual_assignment(
+                faculty=squad_faculty,
+                exam_session=session,
+                all_active_semesters=Semester.query.filter_by(is_active=True).all(),
+                buffer_minutes=60,
+                duty_type='Squad Duty',
+                exclude_duty_id=squad_duty.id if squad_duty else None,
+                current_slot_duties=run_duties,
+            )
+            if not validation['can_assign']:
+                return jsonify({
+                    'error': f"{squad_faculty.name} does not meet mandatory assignment constraints.",
+                    'errors': validation['errors'],
+                    'conflict_details': validation['conflict_details']
+                }), 409
         if squad_duty:
             if squad_fac_id:
                 squad_duty.faculty_id = int(squad_fac_id)
@@ -1086,6 +1226,46 @@ def update_session(session_id):
                     cur_fid = cands[0].id
 
             if cur_fid:
+                candidate_faculty = db.session.get(Faculty, cur_fid)
+                if not candidate_faculty:
+                    return jsonify({'error': f'Faculty {cur_fid} was not found.'}), 404
+                db.session.expire(candidate_faculty, ['duties'])
+                validation = AllocationValidator.validate_manual_assignment(
+                    faculty=candidate_faculty,
+                    exam_session=osess,
+                    all_active_semesters=Semester.query.filter_by(is_active=True).all(),
+                    buffer_minutes=60,
+                    duty_type=r_duty.duty_type if r_duty else 'Invigilation',
+                    exclude_duty_id=r_duty.id if r_duty else None,
+                    current_slot_duties=run_duties
+                )
+                if not validation['can_assign']:
+                    alternatives = find_conflict_free_faculty_for_session(
+                        osess,
+                        exclude_faculty_ids=all_assigned_in_slot | {cur_fid}
+                    )
+                    alternative = None
+                    for candidate in alternatives:
+                        candidate_validation = AllocationValidator.validate_manual_assignment(
+                            faculty=candidate,
+                            exam_session=osess,
+                            all_active_semesters=Semester.query.filter_by(is_active=True).all(),
+                            buffer_minutes=60,
+                            duty_type=r_duty.duty_type if r_duty else 'Invigilation',
+                            exclude_duty_id=r_duty.id if r_duty else None,
+                            current_slot_duties=run_duties
+                        )
+                        if candidate_validation['can_assign']:
+                            alternative = candidate
+                            break
+                    if not alternative:
+                        return jsonify({
+                            'error': f"{candidate_faculty.name} does not meet mandatory assignment constraints.",
+                            'errors': validation['errors'],
+                            'conflict_details': validation['conflict_details']
+                        }), 409
+                    cur_fid = alternative.id
+
                 all_assigned_in_slot.add(cur_fid)
                 if not r_duty:
                     r_duty = Duty(
@@ -1100,6 +1280,16 @@ def update_session(session_id):
                 r_duty.status = 'ASSIGNED'
                 r_duty.override_reason = f'Cascaded timing {osess.start_time}-{osess.end_time} with timetable protection'
                 r_duty.updated_at = datetime.utcnow()
+                run_duties.append({
+                    'faculty_id': cur_fid,
+                    'exam_date': osess.exam_date,
+                    'start_time': osess.start_time,
+                    'end_time': osess.end_time,
+                    'cie_id': osess.cie_id,
+                    'semester_id': osess.semester_id,
+                    'sem_number': osess.semester.sem_number if osess.semester else None,
+                    'academic_year': osess.cie.academic_year if osess.cie else None
+                })
 
     details_msg = f"Updated exam session ID {session.id} ({session.subject.code if session.subject else 'Subject'}): date {session.exam_date}, time {session.start_time}-{session.end_time}."
     if cascaded_count > 0:
@@ -1130,8 +1320,10 @@ def batch_update_sessions():
     Checks respected timetables for each session and ensures conflict-free assignments.
     """
     data = request.get_json() or {}
+    EligibilityEngine.lock_quota_window()
     session_items = data.get('sessions', [])
     updated_sessions = []
+    run_duties = []
 
     all_sems = Semester.query.all()
     dow_map = {0: 'MON', 1: 'TUE', 2: 'WED', 3: 'THU', 4: 'FRI', 5: 'SAT', 6: 'SUN'}
@@ -1196,6 +1388,31 @@ def batch_update_sessions():
                     if cands:
                         fac_id_int = cands[0].id
 
+                duty_type = r_item.get('duty_type') or 'Invigilation'
+                room_obj = ExamRoom.query.get(r_id) if r_id else None
+                existing_duty = (
+                    Duty.query.filter_by(exam_session_id=session.id, exam_room_id=room_obj.id).first()
+                    if room_obj else None
+                )
+                if fac_id_int:
+                    candidate_faculty = db.session.get(Faculty, fac_id_int)
+                    db.session.expire(candidate_faculty, ['duties'])
+                    validation = AllocationValidator.validate_manual_assignment(
+                        faculty=candidate_faculty,
+                        exam_session=session,
+                        all_active_semesters=all_sems,
+                        buffer_minutes=60,
+                        duty_type=duty_type,
+                        exclude_duty_id=existing_duty.id if existing_duty else None,
+                        current_slot_duties=run_duties,
+                    )
+                    if not validation['can_assign']:
+                        return jsonify({
+                            'error': f"{candidate_faculty.name} does not meet mandatory assignment constraints.",
+                            'errors': validation['errors'],
+                            'conflict_details': validation['conflict_details']
+                        }), 409
+
                 if fac_id_int:
                     assigned_in_session.add(fac_id_int)
 
@@ -1216,9 +1433,21 @@ def batch_update_sessions():
                         db.session.add(duty)
                     duty.faculty_id = fac_id_int
                     duty.status = 'ASSIGNED' if fac_id_int else 'PENDING'
+                    duty.duty_type = duty_type
                     duty.is_manual_override = True
                     duty.override_reason = f'Batch Updated ({session.start_time}-{session.end_time}) with timetable verification'
                     duty.updated_at = datetime.utcnow()
+                    if fac_id_int:
+                        run_duties.append({
+                            'faculty_id': fac_id_int,
+                            'exam_date': session.exam_date,
+                            'start_time': session.start_time,
+                            'end_time': session.end_time,
+                            'cie_id': session.cie_id,
+                            'semester_id': session.semester_id,
+                            'sem_number': session.semester.sem_number if session.semester else None,
+                            'academic_year': session.cie.academic_year if session.cie else None
+                        })
         else:
             for room_obj in session.exam_rooms:
                 duty = Duty.query.filter_by(exam_session_id=session.id, exam_room_id=room_obj.id).first()
@@ -1245,6 +1474,27 @@ def batch_update_sessions():
                         cur_fid = cands[0].id
 
                 if cur_fid:
+                    candidate_faculty = db.session.get(Faculty, cur_fid)
+                    if not candidate_faculty:
+                        return jsonify({'error': f'Faculty {cur_fid} was not found.'}), 404
+                    db.session.expire(candidate_faculty, ['duties'])
+                    validation = AllocationValidator.validate_manual_assignment(
+                        faculty=candidate_faculty,
+                        exam_session=session,
+                        all_active_semesters=all_sems,
+                        buffer_minutes=60,
+                        duty_type=duty.duty_type if duty else 'Invigilation',
+                        exclude_duty_id=duty.id if duty else None,
+                        current_slot_duties=run_duties,
+                    )
+                    if not validation['can_assign']:
+                        return jsonify({
+                            'error': f"{candidate_faculty.name} does not meet mandatory assignment constraints.",
+                            'errors': validation['errors'],
+                            'conflict_details': validation['conflict_details']
+                        }), 409
+
+                if cur_fid:
                     assigned_in_session.add(cur_fid)
                     if not duty:
                         duty = Duty(
@@ -1258,6 +1508,16 @@ def batch_update_sessions():
                     duty.status = 'ASSIGNED'
                     duty.override_reason = f'Batch Updated ({session.start_time}-{session.end_time}) with timetable verification'
                     duty.updated_at = datetime.utcnow()
+                    run_duties.append({
+                        'faculty_id': cur_fid,
+                        'exam_date': session.exam_date,
+                        'start_time': session.start_time,
+                        'end_time': session.end_time,
+                        'cie_id': session.cie_id,
+                        'semester_id': session.semester_id,
+                        'sem_number': session.semester.sem_number if session.semester else None,
+                        'academic_year': session.cie.academic_year if session.cie else None
+                    })
         
         updated_sessions.append(session.to_dict())
 
@@ -1286,6 +1546,7 @@ def shift_slot_time():
 
     if not current_date_str or not current_start_time or not new_start_time or not new_end_time:
         return jsonify({'error': 'current_date, current_start_time, new_start_time, and new_end_time are required'}), 400
+    EligibilityEngine.lock_quota_window()
 
     try:
         c_date = datetime.strptime(current_date_str, '%Y-%m-%d').date()
@@ -1313,6 +1574,7 @@ def shift_slot_time():
     all_sems = Semester.query.all()
     updated_count = len(sessions)
     reassigned_count = 0
+    run_duties = []
 
     for s in sessions:
         if not all_dates:
@@ -1358,6 +1620,47 @@ def shift_slot_time():
                     reassigned_count += 1
 
             if cur_fid:
+                candidate_faculty = db.session.get(Faculty, cur_fid)
+                if not candidate_faculty:
+                    return jsonify({'error': f'Faculty {cur_fid} was not found.'}), 404
+                db.session.expire(candidate_faculty, ['duties'])
+                validation = AllocationValidator.validate_manual_assignment(
+                    faculty=candidate_faculty,
+                    exam_session=s,
+                    all_active_semesters=all_sems,
+                    buffer_minutes=60,
+                    duty_type=r_duty.duty_type if r_duty else 'Invigilation',
+                    exclude_duty_id=r_duty.id if r_duty else None,
+                    current_slot_duties=run_duties,
+                )
+                if not validation['can_assign']:
+                    alternatives = find_conflict_free_faculty_for_session(
+                        s,
+                        exclude_faculty_ids=s_assigned_fids | {cur_fid}
+                    )
+                    alternative = None
+                    for candidate in alternatives:
+                        candidate_validation = AllocationValidator.validate_manual_assignment(
+                            faculty=candidate,
+                            exam_session=s,
+                            all_active_semesters=all_sems,
+                            buffer_minutes=60,
+                            duty_type=r_duty.duty_type if r_duty else 'Invigilation',
+                            exclude_duty_id=r_duty.id if r_duty else None,
+                            current_slot_duties=run_duties,
+                        )
+                        if candidate_validation['can_assign']:
+                            alternative = candidate
+                            break
+                    if not alternative:
+                        return jsonify({
+                            'error': f"{candidate_faculty.name} does not meet mandatory assignment constraints.",
+                            'errors': validation['errors'],
+                            'conflict_details': validation['conflict_details']
+                        }), 409
+                    cur_fid = alternative.id
+                    reassigned_count += 1
+
                 s_assigned_fids.add(cur_fid)
                 if not r_duty:
                     r_duty = Duty(
@@ -1372,6 +1675,16 @@ def shift_slot_time():
                 r_duty.status = 'ASSIGNED'
                 r_duty.override_reason = f'Shifted slot to {new_start_time}-{new_end_time} with timetable protection'
                 r_duty.updated_at = datetime.utcnow()
+                run_duties.append({
+                    'faculty_id': cur_fid,
+                    'exam_date': s.exam_date,
+                    'start_time': s.start_time,
+                    'end_time': s.end_time,
+                    'cie_id': s.cie_id,
+                    'semester_id': s.semester_id,
+                    'sem_number': s.semester.sem_number if s.semester else None,
+                    'academic_year': s.cie.academic_year if s.cie else None
+                })
 
     audit = AuditLog(
         action='EXAM_SLOT_TIME_SHIFTED',

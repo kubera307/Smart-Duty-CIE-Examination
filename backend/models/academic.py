@@ -53,6 +53,15 @@ class Subject(db.Model):
 
 class TimetableEntry(db.Model):
     __tablename__ = 'timetable_entries'
+    __table_args__ = (
+        db.Index(
+            'ix_timetable_conflict_lookup',
+            'semester_id',
+            'academic_year',
+            'faculty_id',
+            'day_of_week'
+        ),
+    )
 
     id = db.Column(db.Integer, primary_key=True)
     semester_id = db.Column(db.Integer, db.ForeignKey('semesters.id'), nullable=False)
@@ -63,6 +72,7 @@ class TimetableEntry(db.Model):
     day_of_week = db.Column(db.String(10), nullable=False)  # MON, TUE, WED, THU, FRI, SAT
     start_time = db.Column(db.String(5), nullable=False)   # HH:MM (e.g., '09:00')
     end_time = db.Column(db.String(5), nullable=False)     # HH:MM (e.g., '10:00')
+    section = db.Column(db.String(50), nullable=True)
     room_number = db.Column(db.String(50), nullable=True)
     department = db.Column(db.String(100), default='CSE (AI & ML)')
 
@@ -81,9 +91,40 @@ class TimetableEntry(db.Model):
             'subject_id': self.subject_id,
             'subject_code': self.subject.code if self.subject else None,
             'subject_name': self.subject.name if self.subject else None,
+            'academic_year': self.academic_year,
             'day_of_week': self.day_of_week,
             'start_time': self.start_time,
             'end_time': self.end_time,
+            'section': self.section,
             'room_number': self.room_number
         }
 
+
+class TimetableCoverage(db.Model):
+    __tablename__ = 'timetable_coverage'
+    __table_args__ = (
+        db.UniqueConstraint(
+            'academic_year',
+            'sem_number',
+            'department',
+            name='uq_timetable_coverage_scope'
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    academic_year = db.Column(db.String(20), nullable=False)
+    sem_number = db.Column(db.Integer, nullable=False)
+    department = db.Column(db.String(100), nullable=False)
+    is_verified = db.Column(db.Boolean, nullable=False, default=False)
+    verified_at = db.Column(db.DateTime, nullable=True)
+
+    def to_dict(self, entry_count=0):
+        return {
+            'id': self.id,
+            'academic_year': self.academic_year,
+            'sem_number': self.sem_number,
+            'department': self.department,
+            'is_verified': self.is_verified,
+            'verified_at': self.verified_at.isoformat() if self.verified_at else None,
+            'entry_count': entry_count
+        }

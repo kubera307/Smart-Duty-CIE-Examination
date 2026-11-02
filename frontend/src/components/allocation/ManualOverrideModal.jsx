@@ -2,14 +2,11 @@ import React, { useState, useEffect } from 'react';
 import Modal from '../common/Modal';
 import { allocationApi } from '../../services/allocationApi';
 import { facultyApi } from '../../services/facultyApi';
-import { AlertTriangle, ShieldCheck, Check } from 'lucide-react';
 
 const ManualOverrideModal = ({ isOpen, onClose, duty, onSuccess }) => {
   const [facultyList, setFacultyList] = useState([]);
   const [selectedFacultyId, setSelectedFacultyId] = useState('');
   const [overrideReason, setOverrideReason] = useState('');
-  const [confirmedForce, setConfirmedForce] = useState(false);
-  const [conflictWarning, setConflictWarning] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -20,8 +17,6 @@ const ManualOverrideModal = ({ isOpen, onClose, duty, onSuccess }) => {
       });
       setSelectedFacultyId(duty?.faculty_id || '');
       setOverrideReason('');
-      setConfirmedForce(false);
-      setConflictWarning(null);
       setError(null);
     }
   }, [isOpen, duty]);
@@ -40,7 +35,6 @@ const ManualOverrideModal = ({ isOpen, onClose, duty, onSuccess }) => {
       const payload = {
         duty_id: duty.id,
         faculty_id: parseInt(selectedFacultyId),
-        force_override: confirmedForce,
         override_reason: overrideReason
       };
 
@@ -50,12 +44,11 @@ const ManualOverrideModal = ({ isOpen, onClose, duty, onSuccess }) => {
         onClose();
       }
     } catch (err) {
-      if (err.response?.status === 409 && err.response?.data?.requires_force) {
-        // Backend detected constraint collision!
-        setConflictWarning(err.response.data);
-      } else {
-        setError(err.response?.data?.error || err.message || 'Override failed');
-      }
+      const details = err.response?.data;
+      setError([
+        details?.error || err.message || 'Assignment failed',
+        ...(details?.errors || [])
+      ].join(' '));
     } finally {
       setLoading(false);
     }
@@ -77,41 +70,6 @@ const ManualOverrideModal = ({ isOpen, onClose, duty, onSuccess }) => {
           </div>
         </div>
 
-        {/* Warning Banner if Conflict detected */}
-        {conflictWarning && (
-          <div className="p-4 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 space-y-2">
-            <div className="flex items-center gap-2 font-bold text-amber-800">
-              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>WARNING: CONSTRAINT VIOLATION DETECTED</span>
-            </div>
-            <p className="text-[11px] leading-relaxed">
-              The selected faculty violates standard institutional allocation rules:
-            </p>
-            <ul className="list-disc pl-4 space-y-1 text-[11px] text-amber-950 font-medium">
-              {conflictWarning.errors?.map((err, i) => (
-                <li key={i}>{err}</li>
-              ))}
-              {conflictWarning.warnings?.map((warn, i) => (
-                <li key={i}>{warn}</li>
-              ))}
-            </ul>
-
-            <div className="pt-2 border-t border-amber-200">
-              <label className="flex items-start gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={confirmedForce}
-                  onChange={(e) => setConfirmedForce(e.target.checked)}
-                  className="mt-0.5 rounded text-amber-600 focus:ring-amber-500"
-                />
-                <span className="text-[11px] font-bold text-amber-950">
-                  I understand the conflict and confirm this manual override as Exam Coordinator.
-                </span>
-              </label>
-            </div>
-          </div>
-        )}
-
         {/* Faculty Select */}
         <div>
           <label className="block font-semibold text-slate-700 mb-1">Select Reassigned Faculty</label>
@@ -119,8 +77,7 @@ const ManualOverrideModal = ({ isOpen, onClose, duty, onSuccess }) => {
             value={selectedFacultyId}
             onChange={(e) => {
               setSelectedFacultyId(e.target.value);
-              setConflictWarning(null);
-              setConfirmedForce(false);
+              setError(null);
             }}
             className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs focus:ring-1 focus:ring-sky-500 focus:outline-none"
             required
@@ -145,7 +102,6 @@ const ManualOverrideModal = ({ isOpen, onClose, duty, onSuccess }) => {
             onChange={(e) => setOverrideReason(e.target.value)}
             placeholder="e.g., Faculty requested duty swap; department approved emergency coverage..."
             className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs focus:ring-1 focus:ring-sky-500 focus:outline-none"
-            required={Boolean(conflictWarning)}
           />
         </div>
 
@@ -166,14 +122,10 @@ const ManualOverrideModal = ({ isOpen, onClose, duty, onSuccess }) => {
           </button>
           <button
             type="submit"
-            disabled={loading || (conflictWarning && !confirmedForce)}
-            className={`px-4 py-2 rounded-lg font-semibold text-white transition-all text-xs flex items-center gap-1.5 ${
-              conflictWarning
-                ? 'bg-amber-600 hover:bg-amber-700 disabled:opacity-50'
-                : 'bg-sky-600 hover:bg-sky-700 disabled:opacity-50'
-            }`}
+            disabled={loading}
+            className="px-4 py-2 rounded-lg font-semibold text-white transition-all text-xs flex items-center gap-1.5 bg-sky-600 hover:bg-sky-700 disabled:opacity-50"
           >
-            {loading ? 'Saving...' : conflictWarning ? 'Force Override Reassignment' : 'Confirm Assignment'}
+            {loading ? 'Saving...' : 'Confirm Assignment'}
           </button>
         </div>
       </form>
@@ -182,4 +134,3 @@ const ManualOverrideModal = ({ isOpen, onClose, duty, onSuccess }) => {
 };
 
 export default ManualOverrideModal;
-

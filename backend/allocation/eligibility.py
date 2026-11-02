@@ -1,5 +1,8 @@
 from .buffer_rules import BufferRuleEvaluator
 from .timetable_conflicts import TimetableConflictEngine
+from .timetable_conflicts import normalize_academic_year
+from models import db, SystemSettings
+from sqlalchemy import text, update
 
 class EligibilityEngine:
     """
@@ -10,16 +13,132 @@ class EligibilityEngine:
     2. Exclusion Flag: Must be flagged eligible_for_duty == True.
     3. Availability / Leave: Must not have recorded unavailability/leave covering this slot.
     4. Exam Duty Buffer: Must not have simultaneous/overlapping assigned exam duties.
-    5. Timetable Conflict: Must have NO regular classes in active regular-class semesters within the session time plus buffer.
-    6. Duty Capacity: Must not exceed max_duty_capacity.
+    5. Timetable Conflict: Must have NO class in the relevant semester/department timetables within the session time plus buffer.
+    6. Duty Quota: Must not exceed max_duty_capacity in the configured quota period.
     """
+
+    QUOTA_PERIODS = ('cie', 'month', 'semester', 'academic_term')
+    DEFAULT_DUTY_QUOTA = 15
+
+    @classmethod
+    def lock_quota_window(cls):
+        if db.engine.dialect.name == 'sqlite':
+            db.session.execute(text(
+                "INSERT OR IGNORE INTO system_settings (key, value, description) "
+                "VALUES ('duty_quota_lock', '0', 'Serialized duty quota checks')"
+            ))
+            db.session.execute(
+                update(SystemSettings)
+                .where(SystemSettings.key == 'duty_quota_lock')
+                .values(value=SystemSettings.value)
+            )
+
+    @classmethod
+    def get_quota_period(cls):
+        setting = SystemSettings.query.filter_by(key='duty_quota_period').first()
+        period = (setting.value if setting else 'cie').strip().lower()
+        return period if period in cls.QUOTA_PERIODS else 'cie'
+
+    @staticmethod
+    def get_duty_spacing_settings():
+        session_setting = SystemSettings.query.filter_by(key='duty_spacing_sessions').first()
+        day_setting = SystemSettings.query.filter_by(key='duty_spacing_days').first()
+        try:
+            minimum_sessions_between = max(0, int(session_setting.value)) if session_setting else 1
+        except (TypeError, ValueError):
+            minimum_sessions_between = 1
+        try:
+            minimum_rest_days = max(0, int(day_setting.value)) if day_setting else 1
+        except (TypeError, ValueError):
+            minimum_rest_days = 1
+        return {
+            'minimum_sessions_between': minimum_sessions_between,
+            'minimum_rest_days': minimum_rest_days
+        }
+
+    @staticmethod
+    def _same_quota_period(existing_session, target_session, period):
+        if period == 'cie':
+            return existing_session.cie_id == target_session.cie_id
+        if period == 'month':
+            return (
+                existing_session.exam_date.year == target_session.exam_date.year
+                and existing_session.exam_date.month == target_session.exam_date.month
+            )
+        if period == 'semester':
+            return existing_session.semester_id == target_session.semester_id
+        if period == 'academic_term':
+            existing_sem = existing_session.semester
+            target_sem = target_session.semester
+            same_parity = (
+                existing_sem is not None
+                and target_sem is not None
+                and existing_sem.sem_number % 2 == target_sem.sem_number % 2
+            )
+            existing_year = normalize_academic_year(
+                existing_session.cie.academic_year if existing_session.cie else None
+            )
+            target_year = normalize_academic_year(
+                target_session.cie.academic_year if target_session.cie else None
+            )
+            return same_parity and existing_year == target_year
+        return False
+
+    @classmethod
+    def get_quota_usage(
+        cls,
+        faculty,
+        exam_session,
+        quota_period=None,
+        run_duties=None,
+        exclude_duty_id=None,
+        quota_scope_session_ids=None
+    ):
+        period = quota_period or cls.get_quota_period()
+        used = sum(
+            1 for duty in faculty.duties
+            if duty.id != exclude_duty_id
+            and duty.status in ('ASSIGNED', 'COMPLETED')
+            and duty.exam_session
+            and not (
+                period == 'cie'
+                and quota_scope_session_ids is not None
+                and duty.exam_session_id not in quota_scope_session_ids
+            )
+            and cls._same_quota_period(duty.exam_session, exam_session, period)
+        )
+        for duty_data in run_duties or []:
+            if duty_data.get('faculty_id') != faculty.id:
+                continue
+            if period == 'cie' and duty_data.get('cie_id') == exam_session.cie_id:
+                used += 1
+            elif period == 'month':
+                duty_date = duty_data.get('exam_date')
+                if duty_date and duty_date.year == exam_session.exam_date.year and duty_date.month == exam_session.exam_date.month:
+                    used += 1
+            elif period == 'semester' and duty_data.get('semester_id') == exam_session.semester_id:
+                used += 1
+            elif period == 'academic_term':
+                duty_sem_number = duty_data.get('sem_number')
+                duty_year = normalize_academic_year(duty_data.get('academic_year'))
+                target_year = normalize_academic_year(
+                    exam_session.cie.academic_year if exam_session.cie else None
+                )
+                if (
+                    duty_sem_number is not None
+                    and exam_session.semester
+                    and duty_sem_number % 2 == exam_session.semester.sem_number % 2
+                    and duty_year == target_year
+                ):
+                    used += 1
+        return used
 
     @classmethod
     def get_exam_duty_buffer_conflicts(
         cls,
         faculty,
         exam_session,
-        buffer_minutes=60,
+        buffer_minutes=30,
         current_slot_duties=None,
         exclude_duty_id=None,
         regular_semester_ids=None
@@ -68,17 +187,18 @@ class EligibilityEngine:
         return sorted(set(conflicts))
 
     @classmethod
-    def evaluate_candidate(cls, faculty, exam_session, regular_semester_ids, current_slot_duties=None, buffer_minutes=60, duty_type='Invigilation', run_assigned_count=0, ignore_capacity=False, exclude_duty_id=None):
+    def evaluate_candidate(cls, faculty, exam_session, regular_semester_ids=None, current_slot_duties=None, buffer_minutes=60, exam_duty_buffer_minutes=30, duty_type='Invigilation', run_assigned_count=0, ignore_capacity=False, exclude_duty_id=None, quota_period=None, run_duties=None, all_semesters=None, coverage_missing=None, quota_scope_session_ids=None):
         """
         Args:
             faculty: Faculty object
             exam_session: ExamSession object
             regular_semester_ids: set of int (semesters having regular classes)
             current_slot_duties: list of Duty objects already assigned in this allocation run or existing in db
-            buffer_minutes: int (default 60)
+            buffer_minutes: int timetable buffer (default 60)
+            exam_duty_buffer_minutes: int gap between exam duties (default 30)
             duty_type: 'Invigilation' | 'Squad Duty' | 'Room Superintendent'
-            run_assigned_count: int (number of duties assigned to this faculty during the current CIE allocation run)
-            ignore_capacity: bool (whether to bypass capacity limit to ensure all slots are staffed)
+            run_assigned_count: legacy per-run workload count
+            ignore_capacity: retained for compatibility; hard quotas are never bypassed
             
         Returns:
             dict: {
@@ -115,17 +235,29 @@ class EligibilityEngine:
         elif is_squad_only and duty_type == 'Squad Duty':
             checks_passed.append(f"{faculty.name} verified as designated Squad Duty officer.")
 
-        # 3. Capacity Ceiling Check (strictly scoped to this CIE cycle's run_assigned_count)
-        # SQUAD DUTY: Squad-designated officers (e.g. Dr. Arjun B C) are exempt from room capacity ceiling
-        is_squad_exempt = is_squad_only and duty_type == 'Squad Duty'
-        eff_capacity = faculty.max_duty_capacity if faculty.max_duty_capacity is not None else 10
-        total_workload = run_assigned_count
-        if not ignore_capacity and not is_squad_exempt and total_workload >= eff_capacity:
+        # 3. Hard quota check across confirmed assignments in the configured period.
+        eff_capacity = (
+            faculty.max_duty_capacity
+            if faculty.max_duty_capacity is not None
+            else cls.DEFAULT_DUTY_QUOTA
+        )
+        effective_period = quota_period or cls.get_quota_period()
+        total_workload = cls.get_quota_usage(
+            faculty,
+            exam_session,
+            quota_period=effective_period,
+            run_duties=run_duties,
+            exclude_duty_id=exclude_duty_id,
+            quota_scope_session_ids=quota_scope_session_ids
+        )
+        if total_workload >= eff_capacity:
             disqualifications.append(
-                f"Maximum workload capacity reached ({total_workload}/{eff_capacity} duties assigned in this CIE cycle)."
+                f"Duty capacity/quota full ({total_workload}/{eff_capacity}) for the {effective_period.replace('_', ' ')} period."
             )
         else:
-            checks_passed.append(f"Duty capacity available ({total_workload}/{eff_capacity} assigned in this CIE).")
+            checks_passed.append(
+                f"Duty quota available ({total_workload}/{eff_capacity}) for the {effective_period.replace('_', ' ')} period."
+            )
 
         # 4. Explicit Availability / Leave Check
         e_start = BufferRuleEvaluator.parse_minutes(exam_session.start_time)
@@ -148,7 +280,7 @@ class EligibilityEngine:
         duty_conflicts = cls.get_exam_duty_buffer_conflicts(
             faculty=faculty,
             exam_session=exam_session,
-            buffer_minutes=buffer_minutes,
+            buffer_minutes=exam_duty_buffer_minutes,
             current_slot_duties=current_slot_duties,
             exclude_duty_id=exclude_duty_id,
             regular_semester_ids=regular_semester_ids
@@ -163,12 +295,15 @@ class EligibilityEngine:
                 "No conflicting simultaneous or buffer-violating assigned exam duties."
             )
 
-        # 6. Timetable & Buffer Conflict Check (Always evaluate to protect Robotics and regular semester classes)
+        # 6. Respect active peer-semester timetables and their buffer windows.
+        # Concurrent Robotics third-semester CIEs are excluded by the conflict engine.
         tt_result = TimetableConflictEngine.check_faculty_timetable_conflicts(
             faculty=faculty,
             exam_session=exam_session,
-            regular_semester_ids=regular_semester_ids or set(),
-            buffer_minutes=buffer_minutes
+            regular_semester_ids=regular_semester_ids,
+            buffer_minutes=buffer_minutes,
+            all_semesters=all_semesters,
+            coverage_missing=coverage_missing
         )
 
         if tt_result['has_conflict']:
@@ -179,7 +314,7 @@ class EligibilityEngine:
                     f"({conf['class_time']}) violates {buffer_minutes}m buffer protection."
                 )
         else:
-            checks_passed.append(f"Timetable clear across regular and Robotics classes with protected {buffer_minutes}m buffer.")
+            checks_passed.append(f"Timetable clear for the applicable peer semesters with protected {buffer_minutes}m buffer.")
 
         is_eligible = len(disqualifications) == 0
 

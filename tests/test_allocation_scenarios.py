@@ -1,7 +1,7 @@
 import unittest
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'backend')))
@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 from app import create_app
 from models import (
     db, Faculty, Semester, Subject, TimetableEntry,
-    CIE, ExamSession, Duty, FacultyAvailability
+    CIE, ExamSession, Duty, FacultyAvailability, TimetableCoverage
 )
 from allocation.buffer_rules import BufferRuleEvaluator
 from allocation.eligibility import EligibilityEngine
@@ -37,6 +37,28 @@ class TestAllocationScenarios(unittest.TestCase):
         cls.app = create_app(ScenarioTestConfig)
         cls.app_context = cls.app.app_context()
         cls.app_context.push()
+        for cie in CIE.query.all():
+            academic_year = ''.join(
+                character for character in (cie.academic_year or '') if character.isdigit()
+            )
+            if len(academic_year) >= 6:
+                academic_year = f'{academic_year[:4]}-{academic_year[-2:]}'
+            for semester in Semester.query.all():
+                for department in ('CSE (AI & ML)', 'Robotics & Artificial Intelligence'):
+                    coverage = TimetableCoverage.query.filter_by(
+                        academic_year=academic_year,
+                        sem_number=semester.sem_number,
+                        department=department
+                    ).first()
+                    if not coverage:
+                        coverage = TimetableCoverage(
+                            academic_year=academic_year,
+                            sem_number=semester.sem_number,
+                            department=department
+                        )
+                        db.session.add(coverage)
+                    coverage.is_verified = True
+        db.session.commit()
 
     @classmethod
     def tearDownClass(cls):
@@ -114,9 +136,15 @@ class TestAllocationScenarios(unittest.TestCase):
         db.session.add(faculty)
         db.session.flush()
         exam_date = date(2027, 1, 10)
+        cie = CIE.query.first()
+        semester = Semester.query.filter(Semester.sem_number.in_((3, 5, 7))).first()
 
         def evaluate(start_time):
             session = SimpleNamespace(
+                cie_id=cie.id,
+                cie=cie,
+                semester_id=semester.id,
+                semester=semester,
                 exam_date=exam_date,
                 start_time=start_time,
                 end_time='12:00'
@@ -130,6 +158,7 @@ class TestAllocationScenarios(unittest.TestCase):
                     'exam_date': exam_date,
                     'start_time': '09:00',
                     'end_time': '10:00',
+                    'cie_id': cie.id,
                     'room_number': 'LH-101'
                 }],
                 buffer_minutes=60
@@ -305,6 +334,67 @@ class TestAllocationScenarios(unittest.TestCase):
             db.session.delete(faculty)
             db.session.commit()
 
+    def test_partial_cie_allocation_scopes_quota_to_selected_sessions(self):
+        cie = CIE.query.first()
+        semester3 = Semester.query.filter_by(sem_number=3).first()
+        semester5 = Semester.query.filter_by(sem_number=5).first()
+        subject3 = Subject.query.filter_by(semester_id=semester3.id).first()
+        subject5 = Subject.query.filter_by(semester_id=semester5.id).first()
+        faculty = Faculty(
+            name="Scoped Quota Regression Faculty",
+            max_duty_capacity=1,
+            is_active=True,
+            eligible_for_duty=True
+        )
+        db.session.add(faculty)
+        db.session.flush()
+        prior_session = ExamSession(
+            cie_id=cie.id,
+            semester_id=semester3.id,
+            subject_id=subject3.id,
+            exam_date=date(2027, 1, 8),
+            start_time='09:00',
+            end_time='10:00'
+        )
+        target_session = ExamSession(
+            cie_id=cie.id,
+            semester_id=semester5.id,
+            subject_id=subject5.id,
+            exam_date=date(2027, 1, 12),
+            start_time='09:00',
+            end_time='10:00',
+            required_invigilators=1,
+            required_squad=0
+        )
+        db.session.add_all([prior_session, target_session])
+        db.session.flush()
+        db.session.add(Duty(
+            exam_session_id=prior_session.id,
+            faculty_id=faculty.id,
+            duty_type='Invigilation',
+            status='ASSIGNED'
+        ))
+        db.session.commit()
+
+        try:
+            result = AllocationOptimizer.run_optimization(
+                cie=cie,
+                exam_sessions=[target_session],
+                all_faculty=[faculty],
+                all_semesters=[semester3, semester5],
+                quota_scope_session_ids={target_session.id}
+            )
+            assigned = [
+                duty for duty in result['allocated_duties']
+                if duty['status'] == 'ASSIGNED' and duty['faculty_id'] == faculty.id
+            ]
+            self.assertEqual(len(assigned), 1)
+        finally:
+            db.session.delete(prior_session)
+            db.session.delete(target_session)
+            db.session.delete(faculty)
+            db.session.commit()
+
     def test_08c_optimizer_tracks_duty_buffer_across_slots(self):
         cie = CIE.query.first()
         semester = Semester.query.first()
@@ -358,6 +448,95 @@ class TestAllocationScenarios(unittest.TestCase):
             db.session.delete(faculty)
             db.session.commit()
 
+    def test_global_csp_plan_is_not_overridden_by_local_spacing_preference(self):
+        cie = CIE.query.first()
+        semester3 = Semester.query.filter_by(sem_number=3).first()
+        semester5 = Semester.query.filter_by(sem_number=5).first()
+        subject3 = Subject.query.filter_by(semester_id=semester3.id).first()
+        subject5 = Subject.query.filter_by(semester_id=semester5.id).first()
+        faculty1 = Faculty(
+            name="Global Spacing Faculty One",
+            max_duty_capacity=2,
+            is_active=True,
+            eligible_for_duty=True
+        )
+        faculty2 = Faculty(
+            name="Global Spacing Faculty Two",
+            max_duty_capacity=1,
+            is_active=True,
+            eligible_for_duty=True
+        )
+        db.session.add_all([faculty1, faculty2])
+        db.session.flush()
+
+        exam_date = date(2027, 1, 11)
+        sessions = [
+            ExamSession(
+                cie_id=cie.id,
+                semester_id=semester5.id,
+                subject_id=subject5.id,
+                exam_date=exam_date,
+                start_time=start_time,
+                end_time=end_time,
+                required_invigilators=1,
+                required_squad=0
+            )
+            for start_time, end_time in (
+                ('09:00', '10:00'),
+                ('12:00', '13:00'),
+                ('15:00', '16:00')
+            )
+        ]
+        db.session.add_all(sessions)
+        db.session.flush()
+        db.session.add_all([
+            TimetableEntry(
+                semester_id=semester3.id,
+                faculty_id=faculty2.id,
+                subject_id=subject3.id,
+                academic_year=cie.academic_year,
+                day_of_week='MON',
+                start_time='09:00',
+                end_time='10:00'
+            ),
+            TimetableEntry(
+                semester_id=semester3.id,
+                faculty_id=faculty1.id,
+                subject_id=subject3.id,
+                academic_year=cie.academic_year,
+                day_of_week='MON',
+                start_time='15:00',
+                end_time='16:00'
+            )
+        ])
+        db.session.commit()
+
+        try:
+            result = AllocationOptimizer.run_optimization(
+                cie=cie,
+                exam_sessions=sessions,
+                all_faculty=[faculty1, faculty2],
+                all_semesters=[semester3, semester5],
+                quota_scope_session_ids={session.id for session in sessions}
+            )
+
+            assigned_by_session = {
+                duty['exam_session_id']: duty['faculty_id']
+                for duty in result['allocated_duties']
+                if duty['status'] == 'ASSIGNED'
+            }
+            self.assertEqual(result['stats']['total_allocated'], 3)
+            self.assertEqual(result['stats']['total_pending'], 0)
+            self.assertEqual(assigned_by_session[sessions[0].id], faculty1.id)
+            self.assertEqual(assigned_by_session[sessions[1].id], faculty1.id)
+            self.assertEqual(assigned_by_session[sessions[2].id], faculty2.id)
+        finally:
+            for session in sessions:
+                db.session.delete(session)
+            db.session.delete(faculty1)
+            db.session.delete(faculty2)
+            db.session.commit()
+
     def test_09_two_eligible_faculty_prefer_lower_workload(self):
         """Scenario 9: Two eligible faculty with different workloads -> Prefer lower workload."""
         eligible_fac = Faculty.query.filter_by(eligible_for_duty=True).limit(2).all()
@@ -389,7 +568,7 @@ class TestAllocationScenarios(unittest.TestCase):
         self.assertFalse(eval_res['is_eligible'])
 
     def test_10b_exam_semester_protects_peer_semester_timetables(self):
-        """Only peer semesters in the same odd/even cycle block exam duty."""
+        """Other semesters in the same odd/even cycle block exam duty."""
         semesters = {
             semester.sem_number: semester
             for semester in Semester.query.filter(Semester.sem_number.in_([3, 5, 7])).all()
@@ -397,8 +576,8 @@ class TestAllocationScenarios(unittest.TestCase):
         all_semesters = Semester.query.all()
         expected_regular = {
             3: {5, 7},
-            5: {3, 7},
-            7: {3, 5}
+            5: {3},
+            7: {3}
         }
 
         faculty = Faculty(
@@ -466,7 +645,8 @@ class TestAllocationScenarios(unittest.TestCase):
                         for conflict in conflicts
                     )
                 }
-                self.assertEqual(conflict_semesters, expected_regular[exam_sem_number])
+                expected_conflicts = set(semesters) - {exam_sem_number}
+                self.assertEqual(conflict_semesters, expected_conflicts)
 
                 response = self.app.test_client().get(
                     '/api/allocation/check-faculty-conflicts',
@@ -672,6 +852,14 @@ class TestAllocationScenarios(unittest.TestCase):
     def test_13_end_to_end_allocation_run_cie1(self):
         """Test full allocation run for CIE-1."""
         cie1 = CIE.query.filter(CIE.name.in_(['CIE-1', 'CIE-I'])).first()
+        first_exam_date = min(session.exam_date for session in cie1.exam_sessions)
+        shift_days = ((date.today() - first_exam_date).days // 7 + 1) * 7
+        cie1.start_date += timedelta(days=shift_days)
+        cie1.end_date += timedelta(days=shift_days)
+        for session in cie1.exam_sessions:
+            session.exam_date += timedelta(days=shift_days)
+        db.session.commit()
+
         result = AllocationEngine.generate_cie_allocation(cie1.id, user_identifier="TestRunner")
 
         self.assertIn(result['status'], ('SUCCESS', 'PARTIAL'))

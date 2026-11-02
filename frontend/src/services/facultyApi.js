@@ -8,8 +8,7 @@ export const facultyApi = {
   delete: (id) => api.delete(`/faculty/${id}`),
   clearAll: () => api.post('/faculty/clear-all'),
   addUnavailability: (id, data) => api.post(`/faculty/${id}/unavailability`, data),
-  getDutyQuotas: () => api.get('/faculty/duty-quotas'),
+  getDutyQuotas: (params) => api.get('/faculty/duty-quotas', { params }),
   saveDutyQuotas: (data) => api.post('/faculty/duty-quotas', data),
   assignByQuotas: (cieId, data = {}) => api.post('/faculty/duty-quotas/assign', { cie_id: cieId, ...data }),
 };
-

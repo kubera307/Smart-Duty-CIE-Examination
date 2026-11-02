@@ -4,6 +4,7 @@ import json
 import re
 from models import db, Faculty, FacultyAvailability, Duty, TimetableEntry, AuditLog, AllocationExplanation, AllocationRun, SystemSettings, CIE, ExamSession
 from allocation.engine import AllocationEngine
+from allocation.eligibility import EligibilityEngine
 
 faculty_bp = Blueprint('faculty_bp', __name__)
 
@@ -424,16 +425,44 @@ def get_duty_quotas():
     all_faculty = Faculty.query.filter_by(is_active=True).order_by(Faculty.name).all()
     setting = SystemSettings.query.filter_by(key='faculty_duty_quotas_raw').first()
     saved_raw_text = setting.value if setting else ""
+    quota_period = EligibilityEngine.get_quota_period()
+    cie_id = request.args.get('cie_id', type=int)
+    semester_ids = request.args.get('semester_ids', '')
+    target_semester_ids = []
+    if semester_ids:
+        try:
+            target_semester_ids = [int(value) for value in semester_ids.split(',') if value.strip()]
+        except (TypeError, ValueError):
+            target_semester_ids = []
+    target_session = (
+        ExamSession.query.filter_by(cie_id=cie_id).order_by(ExamSession.exam_date).first()
+        if cie_id else None
+    )
+    quota_scope_session_ids = None
+    if cie_id and target_semester_ids:
+        quota_scope_session_ids = {
+            session.id for session in ExamSession.query.filter(
+                ExamSession.cie_id == cie_id,
+                ExamSession.semester_id.in_(target_semester_ids)
+            ).all()
+        }
 
     quotas_list = []
     text_parts = []
     total_quota = 0
 
     for f in all_faculty:
-        assigned_count = Duty.query.filter_by(faculty_id=f.id).filter(Duty.status != 'CANCELLED').count()
+        assigned_count = Duty.query.filter(
+            Duty.faculty_id == f.id,
+            Duty.status.in_(('ASSIGNED', 'COMPLETED'))
+        ).count()
         is_squad_only = getattr(f, 'only_squad_duty', False) or f.id == 1 or 'Arjun' in (f.name or '')
         is_senior = 'Associate Professor' in (f.designation or '') or 'Professor' in (f.designation or '') or 'Head' in (f.designation or '')
-        quota = f.max_duty_capacity if f.max_duty_capacity is not None else 5
+        quota = (
+            f.max_duty_capacity
+            if f.max_duty_capacity is not None
+            else EligibilityEngine.DEFAULT_DUTY_QUOTA
+        )
         
         quotas_list.append({
             'faculty_id': f.id,
@@ -443,7 +472,25 @@ def get_duty_quotas():
             'is_squad_only': is_squad_only,
             'eligible_for_duty': f.eligible_for_duty,
             'quota': quota,
-            'assigned_duties': assigned_count
+            'assigned_duties': assigned_count,
+            'quota_used': (
+                EligibilityEngine.get_quota_usage(
+                    f,
+                    target_session,
+                    quota_period,
+                    quota_scope_session_ids=quota_scope_session_ids
+                )
+                if target_session else assigned_count
+            ),
+            'quota_full': (
+                EligibilityEngine.get_quota_usage(
+                    f,
+                    target_session,
+                    quota_period,
+                    quota_scope_session_ids=quota_scope_session_ids
+                ) >= quota
+                if target_session else assigned_count >= quota
+            )
         })
 
         if not is_squad_only and f.eligible_for_duty:
@@ -456,7 +503,9 @@ def get_duty_quotas():
     return jsonify({
         'quotas': quotas_list,
         'raw_text': saved_raw_text or default_raw,
-        'total_quota': total_quota
+        'total_quota': total_quota,
+        'quota_period': quota_period,
+        'quota_periods': list(EligibilityEngine.QUOTA_PERIODS)
     })
 
 
@@ -471,6 +520,11 @@ def update_duty_quotas():
     data = request.get_json() or {}
     raw_text = data.get('raw_text', '').strip()
     quotas_dict = data.get('quotas', {})
+    quota_period = data.get('quota_period')
+    if quota_period is not None and quota_period not in EligibilityEngine.QUOTA_PERIODS:
+        return jsonify({
+            'error': f"quota_period must be one of {', '.join(EligibilityEngine.QUOTA_PERIODS)}"
+        }), 400
 
     all_faculty = Faculty.query.all()
     parsed_quotas = {}
@@ -514,6 +568,18 @@ def update_duty_quotas():
     else:
         setting_json.value = json.dumps(parsed_quotas)
 
+    if quota_period is not None:
+        setting_period = SystemSettings.query.filter_by(key='duty_quota_period').first()
+        if not setting_period:
+            setting_period = SystemSettings(
+                key='duty_quota_period',
+                value=quota_period,
+                description='Period used to enforce faculty CIE duty quotas'
+            )
+            db.session.add(setting_period)
+        else:
+            setting_period.value = quota_period
+
     audit = AuditLog(
         action='DUTY_QUOTAS_UPDATED',
         user_identifier=request.headers.get('X-User', 'Admin'),
@@ -528,7 +594,8 @@ def update_duty_quotas():
         'success': True,
         'message': f"Successfully updated duty quotas for {len(updated_faculties)} faculty members.",
         'updated_faculties': updated_faculties,
-        'raw_text': setting_raw.value
+        'raw_text': setting_raw.value,
+        'quota_period': EligibilityEngine.get_quota_period()
     })
 
 
@@ -586,4 +653,3 @@ def assign_by_duty_quotas():
         })
     except Exception as e:
         return jsonify({'error': f"Quota assignment failed: {str(e)}"}), 500
-

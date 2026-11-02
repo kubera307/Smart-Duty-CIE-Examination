@@ -13,6 +13,8 @@ const Settings = () => {
   const [bufferMinutes, setBufferMinutes] = useState('60');
   const [maxCapacity, setMaxCapacity] = useState('15');
   const [academicYear, setAcademicYear] = useState('2026-2027');
+  const [dutySpacingSessions, setDutySpacingSessions] = useState('1');
+  const [dutySpacingDays, setDutySpacingDays] = useState('1');
 
   useEffect(() => {
     loadSettingsAndAudit();
@@ -31,6 +33,8 @@ const Settings = () => {
       if (sRes.data?.buffer_minutes) setBufferMinutes(sRes.data.buffer_minutes.value);
       if (sRes.data?.max_duty_capacity) setMaxCapacity(sRes.data.max_duty_capacity.value);
       if (sRes.data?.academic_year) setAcademicYear(sRes.data.academic_year.value);
+      if (sRes.data?.duty_spacing_sessions) setDutySpacingSessions(sRes.data.duty_spacing_sessions.value);
+      if (sRes.data?.duty_spacing_days) setDutySpacingDays(sRes.data.duty_spacing_days.value);
     } catch (err) {
       console.error('Error loading settings:', err);
     } finally {
@@ -45,7 +49,9 @@ const Settings = () => {
       await auditApi.updateSettings({
         buffer_minutes: bufferMinutes,
         max_duty_capacity: maxCapacity,
-        academic_year: academicYear
+        academic_year: academicYear,
+        duty_spacing_sessions: dutySpacingSessions,
+        duty_spacing_days: dutySpacingDays
       });
       setSaveSuccess(true);
       loadSettingsAndAudit();
@@ -81,7 +87,7 @@ const Settings = () => {
         </div>
 
         <form onSubmit={handleSaveSettings} className="space-y-4 text-xs">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <label className="block font-semibold text-slate-700 mb-1">
                 Protected Timetable Buffer (Minutes)
@@ -128,6 +134,38 @@ const Settings = () => {
               />
               <p className="text-[10px] text-slate-400 mt-1">
                 Current active institutional cycle
+              </p>
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">
+                Minimum Sessions Between Duties
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="7"
+                value={dutySpacingSessions}
+                onChange={(e) => setDutySpacingSessions(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-sky-500 focus:outline-none"
+              />
+              <p className="text-[10px] text-slate-400 mt-1">
+                Soft preference for other eligible faculty before this person is assigned again (Default: 1)
+              </p>
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">
+                Full Rest Days Between Duties
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="7"
+                value={dutySpacingDays}
+                onChange={(e) => setDutySpacingDays(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-sky-500 focus:outline-none"
+              />
+              <p className="text-[10px] text-slate-400 mt-1">
+                Soft preference for full calendar rest days between separate examination dates (Default: 1)
               </p>
             </div>
           </div>
@@ -198,4 +236,3 @@ const Settings = () => {
 };
 
 export default Settings;
-

@@ -37,6 +37,7 @@ const GenerateAllocation = () => {
   const [quotaRawText, setQuotaRawText] = useState('swathi-1, ankitha-3, sushma-4, megha-4, maseeha-5, shithal-4');
   const [quotaMap, setQuotaMap] = useState({});
   const [facultyQuotaList, setFacultyQuotaList] = useState([]);
+  const [quotaPeriod, setQuotaPeriod] = useState('cie');
   const [quotaFeedback, setQuotaFeedback] = useState(null);
 
   // Engine execution state
@@ -57,14 +58,16 @@ const GenerateAllocation = () => {
         setSelectedCieId(active.id);
       }
     });
-    loadDutyQuotas();
   }, []);
 
-  const loadDutyQuotas = async () => {
+  const loadDutyQuotas = async (cieId = selectedCieId, semesterIds = selectedSemesterIds) => {
     try {
-      const res = await facultyApi.getDutyQuotas();
+      const params = cieId ? { cie_id: cieId } : {};
+      if (semesterIds?.length) params.semester_ids = semesterIds.join(',');
+      const res = await facultyApi.getDutyQuotas(params);
       if (res.data) {
         setFacultyQuotaList(res.data.quotas || []);
+        setQuotaPeriod(res.data.quota_period || 'cie');
         if (res.data.raw_text) setQuotaRawText(res.data.raw_text);
         const map = {};
         (res.data.quotas || []).forEach((q) => {
@@ -76,6 +79,10 @@ const GenerateAllocation = () => {
       console.error('Failed to load duty quotas in generator:', e);
     }
   };
+
+  useEffect(() => {
+    loadDutyQuotas(selectedCieId, selectedSemesterIds);
+  }, [selectedCieId, selectedSemesterIds]);
 
   const parseQuotaStringClient = (text, faculties) => {
     if (!text) return {};
@@ -162,11 +169,17 @@ const GenerateAllocation = () => {
     setError(null);
     setGenerationResult(null);
 
-    // Persist duty quotas before running allocation so solver strictly honors entered limits
+    // Persist duty quotas before running allocation so the solver uses the displayed constraints.
     try {
-      await facultyApi.saveDutyQuotas({ raw_text: quotaRawText, quotas: quotaMap });
+      await facultyApi.saveDutyQuotas({
+        raw_text: quotaRawText,
+        quotas: quotaMap,
+        quota_period: quotaPeriod
+      });
     } catch (qErr) {
-      console.warn('Could not persist duty quotas before allocation:', qErr);
+      setError(qErr.response?.data?.error || 'Could not save quota settings; allocation was not started.');
+      setIsGenerating(false);
+      return;
     }
 
     // Track progress stages
@@ -184,9 +197,20 @@ const GenerateAllocation = () => {
       clearInterval(stageInterval);
       setCurrentStage(6); // Complete
       setGenerationResult(res.data);
+      const allocationUpdate = JSON.stringify({
+        updatedAt: Date.now(),
+        cieId: selectedCieId,
+        semesterIds: selectedSemesterIds,
+      });
+      window.dispatchEvent(new Event('smart-duty:allocation-updated'));
+      try {
+        window.localStorage.setItem('smart-duty:allocation-updated', allocationUpdate);
+      } catch (storageError) {
+        // The in-tab event still refreshes profiles if persistent storage is unavailable.
+      }
       // Reload preview to update counts
       loadPreview(selectedCieId, singleSem, multiSems, includeOneCredit, includeSquad);
-      loadDutyQuotas();
+      loadDutyQuotas(selectedCieId);
     } catch (err) {
       clearInterval(stageInterval);
       setError(err.response?.data?.error || err.message || 'Allocation process encountered an error.');
@@ -462,6 +486,14 @@ const GenerateAllocation = () => {
               </div>
             </div>
 
+            {preview.timetable_coverage_incomplete && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950">
+                <strong>Some timetable scopes are unverified.</strong> Allocation will use available timetable
+                entries for conflict checks. Verify any missing scopes when the timetable is complete:{' '}
+                {preview.missing_timetable_coverage?.join('; ')}.
+              </div>
+            )}
+
             {/* Excluded Faculty Notification */}
             {preview.excluded_faculty_count > 0 && (
               <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs flex items-center justify-between">
@@ -507,6 +539,19 @@ const GenerateAllocation = () => {
                 (e.g. Swathi: 1, Ankitha: 3)
               </span>
             </div>
+            <label className="flex items-center gap-2 text-[11px] font-medium text-slate-700">
+              Quota period
+              <select
+                value={quotaPeriod}
+                onChange={(event) => setQuotaPeriod(event.target.value)}
+                className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+              >
+                <option value="cie">Selected CIE</option>
+                <option value="month">Calendar month</option>
+                <option value="semester">Semester</option>
+                <option value="academic_term">Academic term parity</option>
+              </select>
+            </label>
 
             {/* Faculty Quota Grid / Inputs */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-48 overflow-y-auto pr-1">
@@ -527,6 +572,9 @@ const GenerateAllocation = () => {
                         )}
                       </div>
                       <div className="text-[10px] text-slate-500 truncate">{f.designation || 'Faculty'}</div>
+                      <div className={`text-[10px] ${f.quota_full ? 'text-rose-600' : 'text-slate-500'}`}>
+                        Used: {f.quota_used ?? f.assigned_duties ?? 0} / {curVal}
+                      </div>
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                       <span className="text-[10px] text-slate-400 font-medium">Duties:</span>

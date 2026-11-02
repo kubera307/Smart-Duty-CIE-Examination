@@ -5,6 +5,8 @@ export const academicApi = {
   getSubjects: (semesterId) => api.get('/academic/subjects', { params: { semester_id: semesterId } }),
   createSubject: (data) => api.post('/academic/subjects', data),
   getTimetables: (params) => api.get('/academic/timetables', { params }),
+  getTimetableCoverage: (params) => api.get('/academic/timetable-coverage', { params }),
+  updateTimetableCoverage: (data) => api.post('/academic/timetable-coverage', data),
   createTimetableEntry: (data) => api.post('/academic/timetables', data),
   updateTimetableEntry: (id, data) => api.put(`/academic/timetables/${id}`, data),
   deleteTimetableEntry: (id) => api.delete(`/academic/timetables/${id}`),
@@ -16,6 +18,5 @@ export const academicApi = {
     }),
   parseSampleCircular: () => api.post('/academic/timetables/parse-sample'),
 };
-
 
 

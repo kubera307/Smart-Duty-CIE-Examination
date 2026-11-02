@@ -61,6 +61,33 @@ const StaffProfile = () => {
     loadProfile();
   }, [id]);
 
+  useEffect(() => {
+    const refreshProfile = async () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const res = await facultyApi.getProfile(id);
+        setData(res.data);
+        setError(null);
+      } catch (err) {
+        // Keep the last loaded profile visible if a background refresh fails.
+      }
+    };
+    const handleStorage = (event) => {
+      if (event.key === 'smart-duty:allocation-updated') refreshProfile();
+    };
+
+    window.addEventListener('focus', refreshProfile);
+    window.addEventListener('smart-duty:allocation-updated', refreshProfile);
+    window.addEventListener('storage', handleStorage);
+    document.addEventListener('visibilitychange', refreshProfile);
+    return () => {
+      window.removeEventListener('focus', refreshProfile);
+      window.removeEventListener('smart-duty:allocation-updated', refreshProfile);
+      window.removeEventListener('storage', handleStorage);
+      document.removeEventListener('visibilitychange', refreshProfile);
+    };
+  }, [id]);
+
   const loadProfile = async () => {
     setLoading(true);
     try {
@@ -216,6 +243,31 @@ const StaffProfile = () => {
     if (!timetableBySemester[semName]) timetableBySemester[semName] = [];
     timetableBySemester[semName].push(entry);
   });
+
+  const groupDutiesBySemester = (duties) => {
+    const groups = {};
+    duties.forEach((duty) => {
+      const semesterNumber = Number(duty.sem_number) || null;
+      const semesterKey = semesterNumber ? `semester-${semesterNumber}` : `name-${duty.semester_name || 'other'}`;
+      if (!groups[semesterKey]) {
+        const ordinal = semesterNumber === 1 ? '1st' : semesterNumber === 2 ? '2nd' : semesterNumber === 3 ? '3rd' : `${semesterNumber}th`;
+        groups[semesterKey] = {
+          semesterNumber,
+          label: duty.semester_name || (semesterNumber ? `${ordinal} Semester` : 'Other Semesters'),
+          duties: [],
+        };
+      }
+      groups[semesterKey].duties.push(duty);
+    });
+    const preferredOrder = { 3: 0, 5: 1, 7: 2 };
+    return Object.values(groups).sort((a, b) => {
+      const aOrder = preferredOrder[a.semesterNumber] ?? (10 + (a.semesterNumber ?? 99));
+      const bOrder = preferredOrder[b.semesterNumber] ?? (10 + (b.semesterNumber ?? 99));
+      return aOrder - bOrder || a.label.localeCompare(b.label);
+    });
+  };
+  const upcomingDutyGroups = groupDutiesBySemester(upcomingDuties);
+  const dutyHistoryGroups = groupDutiesBySemester(dutyHistory);
 
   return (
     <div className="space-y-6 max-w-6xl mx-auto">
@@ -512,30 +564,6 @@ const StaffProfile = () => {
         </div>
       </div>
 
-      {/* Semester-Aware Timetable Conflict Logic Banner */}
-      <div className="p-4 rounded-2xl bg-gradient-to-r from-sky-50 via-slate-50 to-indigo-50 border border-sky-200/80 shadow-sm text-xs text-slate-700">
-        <div className="flex items-center gap-2 font-bold text-slate-900 mb-1">
-          <ShieldCheck className="w-4 h-4 text-sky-600" />
-          <span>Semester-Aware Timetable Conflict Audit Rule</span>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2 text-[11px] leading-relaxed">
-          <div className="p-2.5 bg-white rounded-xl border border-slate-200/80">
-            <strong>When 5th & 7th Semesters write exams:</strong>
-            <p className="text-slate-500 mt-0.5">
-              3rd Semester remains in regular class session. The allocation engine strictly inspects this
-              faculty's 3rd semester timetable with mandatory 1-hour pre/post lecture buffers.
-            </p>
-          </div>
-          <div className="p-2.5 bg-white rounded-xl border border-slate-200/80">
-            <strong>When 3rd Semester writes exams:</strong>
-            <p className="text-slate-500 mt-0.5">
-              5th & 7th Semesters remain in regular class session. The engine automatically inspects the 5th and
-              7th semester timetables for lecture and buffer collisions.
-            </p>
-          </div>
-        </div>
-      </div>
-
       {/* Faculty Timetable Grid */}
       <div className="bg-white rounded-2xl border border-slate-200/90 p-6 shadow-sm">
         <div className="border-b border-slate-100 pb-3 mb-4 flex items-center justify-between">
@@ -617,67 +645,74 @@ const StaffProfile = () => {
               No upcoming duties assigned.
             </div>
           ) : (
-            <div className="space-y-2.5">
-              {upcomingDuties.map((d) => (
-                <div
-                  key={d.id}
-                  className="p-3.5 rounded-xl border border-slate-200/80 bg-slate-50/50 hover:bg-slate-50 transition-colors flex flex-col gap-1.5 text-xs"
-                >
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      {d.cie_name && (
-                        <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 border border-blue-200 font-bold text-[10px] tracking-wide uppercase">
-                          {d.cie_name}
-                        </span>
-                      )}
-                      {(d.semester_name || d.sem_number) && (
-                        <span className="px-2 py-0.5 rounded-md bg-purple-50 text-purple-700 border border-purple-200 font-bold text-[10px] tracking-wide">
-                          {d.semester_name || `${d.sem_number}th Sem`}
-                        </span>
-                      )}
-                      {d.duty_type && (
-                        <span className={`px-2 py-0.5 rounded-md text-[10px] border ${
-                          d.duty_type === 'Squad Duty'
-                            ? 'bg-amber-50 text-amber-800 border-amber-200 font-semibold'
-                            : 'bg-slate-100 text-slate-600 border-slate-200 font-medium'
-                        }`}>
-                          {d.duty_type}
-                        </span>
-                      )}
-                    </div>
-                    <Badge variant={d.status === 'COMPLETED' ? 'success' : (d.status === 'ASSIGNED' ? 'warning' : 'slate')}>
-                      {d.status}
-                    </Badge>
+            <div className="space-y-4">
+              {upcomingDutyGroups.map((group) => (
+                <section key={group.semesterNumber || group.label} className="overflow-hidden rounded-xl border border-slate-200">
+                  <div className="flex items-center justify-between gap-2 bg-slate-50 px-3.5 py-2.5">
+                    <h4 className="text-xs font-bold text-slate-800">{group.label}</h4>
+                    <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-500 border border-slate-200">
+                      {group.duties.length} {group.duties.length === 1 ? 'Duty' : 'Duties'}
+                    </span>
                   </div>
+                  <div className="space-y-2 p-2.5">
+                    {group.duties.map((d) => (
+                      <div
+                        key={d.id}
+                        className="flex flex-col gap-1.5 rounded-xl border border-slate-200/80 bg-white p-3 text-xs transition-colors hover:bg-slate-50"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {d.cie_name && (
+                              <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 border border-blue-200 font-bold text-[10px] tracking-wide uppercase">
+                                {d.cie_name}
+                              </span>
+                            )}
+                            {d.duty_type && (
+                              <span className={`px-2 py-0.5 rounded-md text-[10px] border ${
+                                d.duty_type === 'Squad Duty'
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200 font-semibold'
+                                  : 'bg-slate-100 text-slate-600 border-slate-200 font-medium'
+                              }`}>
+                                {d.duty_type}
+                              </span>
+                            )}
+                          </div>
+                          <Badge variant={d.status === 'COMPLETED' ? 'success' : (d.status === 'ASSIGNED' ? 'warning' : 'slate')}>
+                            {d.status}
+                          </Badge>
+                        </div>
 
-                  <div>
-                    <div className="font-bold text-slate-800 text-xs">
-                      {d.subject_code ? <span className="font-mono text-slate-600 mr-1.5 font-bold">{d.subject_code} -</span> : null}
-                      <span>{d.subject_name || 'Subject'}</span>
-                    </div>
-                    <div className="text-[11px] text-slate-500 font-mono mt-1 flex items-center gap-2.5 flex-wrap">
-                      <span className="flex items-center gap-1">
-                        <Calendar className="w-3 h-3 text-slate-400" />
-                        {d.exam_date}
-                      </span>
-                      {(d.start_time || d.end_time) && (
-                        <span className="flex items-center gap-1">
-                          <Clock className="w-3 h-3 text-slate-400" />
-                          {d.start_time}{d.end_time ? ` - ${d.end_time}` : ''}
-                        </span>
-                      )}
-                      <span className="flex items-center gap-1">
-                        <MapPin className="w-3 h-3 text-slate-400" />
-                        Room {d.room_number || 'N/A'}
-                      </span>
-                      {d.student_count ? (
-                        <span className="text-slate-400 font-sans">
-                          ({d.student_count} std)
-                        </span>
-                      ) : null}
-                    </div>
+                        <div>
+                          <div className="font-bold text-slate-800 text-xs">
+                            {d.subject_code ? <span className="font-mono text-slate-600 mr-1.5 font-bold">{d.subject_code} -</span> : null}
+                            <span>{d.subject_name || 'Subject'}</span>
+                          </div>
+                          <div className="text-[11px] text-slate-500 font-mono mt-1 flex items-center gap-2.5 flex-wrap">
+                            <span className="flex items-center gap-1">
+                              <Calendar className="w-3 h-3 text-slate-400" />
+                              {d.exam_date}
+                            </span>
+                            {(d.start_time || d.end_time) && (
+                              <span className="flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-slate-400" />
+                                {d.start_time}{d.end_time ? ` - ${d.end_time}` : ''}
+                              </span>
+                            )}
+                            <span className="flex items-center gap-1">
+                              <MapPin className="w-3 h-3 text-slate-400" />
+                              Room {d.room_number || 'N/A'}
+                            </span>
+                            {d.student_count ? (
+                              <span className="text-slate-400 font-sans">
+                                ({d.student_count} std)
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                </div>
+                </section>
               ))}
             </div>
           )}
@@ -702,67 +737,74 @@ const StaffProfile = () => {
               No duty history available.
             </div>
           ) : (
-            <div className="space-y-2.5">
-              {dutyHistory.map((d) => (
-                <div
-                  key={d.id}
-                  className="p-3.5 rounded-xl border border-slate-200/80 bg-slate-50/50 hover:bg-slate-50 transition-colors flex flex-col gap-1.5 text-xs"
-                >
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      {d.cie_name && (
-                        <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 border border-blue-200 font-bold text-[10px] tracking-wide uppercase">
-                          {d.cie_name}
-                        </span>
-                      )}
-                      {(d.semester_name || d.sem_number) && (
-                        <span className="px-2 py-0.5 rounded-md bg-purple-50 text-purple-700 border border-purple-200 font-bold text-[10px] tracking-wide">
-                          {d.semester_name || `${d.sem_number}th Sem`}
-                        </span>
-                      )}
-                      {d.duty_type && (
-                        <span className={`px-2 py-0.5 rounded-md text-[10px] border ${
-                          d.duty_type === 'Squad Duty'
-                            ? 'bg-amber-50 text-amber-800 border-amber-200 font-semibold'
-                            : 'bg-slate-100 text-slate-600 border-slate-200 font-medium'
-                        }`}>
-                          {d.duty_type}
-                        </span>
-                      )}
-                    </div>
-                    <Badge variant={d.status === 'COMPLETED' ? 'success' : (d.status === 'ASSIGNED' ? 'warning' : 'slate')}>
-                      {d.status}
-                    </Badge>
+            <div className="space-y-4">
+              {dutyHistoryGroups.map((group) => (
+                <section key={group.semesterNumber || group.label} className="overflow-hidden rounded-xl border border-slate-200">
+                  <div className="flex items-center justify-between gap-2 bg-slate-50 px-3.5 py-2.5">
+                    <h4 className="text-xs font-bold text-slate-800">{group.label}</h4>
+                    <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-500 border border-slate-200">
+                      {group.duties.length} {group.duties.length === 1 ? 'Duty' : 'Duties'}
+                    </span>
                   </div>
+                  <div className="space-y-2 p-2.5">
+                    {group.duties.map((d) => (
+                      <div
+                        key={d.id}
+                        className="flex flex-col gap-1.5 rounded-xl border border-slate-200/80 bg-white p-3 text-xs transition-colors hover:bg-slate-50"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {d.cie_name && (
+                              <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-700 border border-blue-200 font-bold text-[10px] tracking-wide uppercase">
+                                {d.cie_name}
+                              </span>
+                            )}
+                            {d.duty_type && (
+                              <span className={`px-2 py-0.5 rounded-md text-[10px] border ${
+                                d.duty_type === 'Squad Duty'
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200 font-semibold'
+                                  : 'bg-slate-100 text-slate-600 border-slate-200 font-medium'
+                              }`}>
+                                {d.duty_type}
+                              </span>
+                            )}
+                          </div>
+                          <Badge variant={d.status === 'COMPLETED' ? 'success' : (d.status === 'ASSIGNED' ? 'warning' : 'slate')}>
+                            {d.status}
+                          </Badge>
+                        </div>
 
-                  <div>
-                    <div className="font-bold text-slate-800 text-xs">
-                      {d.subject_code ? <span className="font-mono text-slate-600 mr-1.5 font-bold">{d.subject_code} -</span> : null}
-                      <span>{d.subject_name || 'Subject'}</span>
-                    </div>
-                    <div className="text-[11px] text-slate-500 font-mono mt-1 flex items-center gap-2.5 flex-wrap">
-                      <span className="flex items-center gap-1">
-                        <Calendar className="w-3 h-3 text-slate-400" />
-                        {d.exam_date}
-                      </span>
-                      {(d.start_time || d.end_time) && (
-                        <span className="flex items-center gap-1">
-                          <Clock className="w-3 h-3 text-slate-400" />
-                          {d.start_time}{d.end_time ? ` - ${d.end_time}` : ''}
-                        </span>
-                      )}
-                      <span className="flex items-center gap-1">
-                        <MapPin className="w-3 h-3 text-slate-400" />
-                        Room {d.room_number || 'N/A'}
-                      </span>
-                      {d.student_count ? (
-                        <span className="text-slate-400 font-sans">
-                          ({d.student_count} std)
-                        </span>
-                      ) : null}
-                    </div>
+                        <div>
+                          <div className="font-bold text-slate-800 text-xs">
+                            {d.subject_code ? <span className="font-mono text-slate-600 mr-1.5 font-bold">{d.subject_code} -</span> : null}
+                            <span>{d.subject_name || 'Subject'}</span>
+                          </div>
+                          <div className="text-[11px] text-slate-500 font-mono mt-1 flex items-center gap-2.5 flex-wrap">
+                            <span className="flex items-center gap-1">
+                              <Calendar className="w-3 h-3 text-slate-400" />
+                              {d.exam_date}
+                            </span>
+                            {(d.start_time || d.end_time) && (
+                              <span className="flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-slate-400" />
+                                {d.start_time}{d.end_time ? ` - ${d.end_time}` : ''}
+                              </span>
+                            )}
+                            <span className="flex items-center gap-1">
+                              <MapPin className="w-3 h-3 text-slate-400" />
+                              Room {d.room_number || 'N/A'}
+                            </span>
+                            {d.student_count ? (
+                              <span className="text-slate-400 font-sans">
+                                ({d.student_count} std)
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                </div>
+                </section>
               ))}
             </div>
           )}

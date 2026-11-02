@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { cieApi } from '../services/cieApi';
+import { academicApi } from '../services/academicApi';
 import { reportApi } from '../services/reportApi';
 import { useAcademicYear } from '../context/AcademicYearContext';
 import {
@@ -17,6 +18,7 @@ import {
 const Reports = () => {
   const { academicYears, selectedYear, setSelectedYear, createYear } = useAcademicYear();
   const [cies, setCies] = useState([]);
+  const [semesterCatalog, setSemesterCatalog] = useState([]);
   const [selectedCycle, setSelectedCycle] = useState('odd'); // 'odd' | 'even'
   const [selectedCieNumber, setSelectedCieNumber] = useState('1'); // '1' | '2' | '3'
   const [selectedCieId, setSelectedCieId] = useState('');
@@ -27,10 +29,12 @@ const Reports = () => {
 
   // Fetch available CIE cycles on initial load and when academic year changes
   useEffect(() => {
-    cieApi.getAll().then((res) => {
-      const list = res.data || [];
-      setCies(list);
-    });
+    Promise.all([cieApi.getAll(), academicApi.getSemesters()])
+      .then(([cieRes, semesterRes]) => {
+        setCies(cieRes.data || []);
+        setSemesterCatalog(semesterRes.data || []);
+      })
+      .catch((err) => console.error('Error loading report metadata:', err));
   }, [selectedYear]);
 
   // Compute Active CIE matching selectedYear and selectedCieNumber ('1', '2', '3')
@@ -69,12 +73,19 @@ const Reports = () => {
     if (selectedCieId) {
       loadReport(selectedCieId, selectedSemesterId);
     }
-  }, [selectedCieId, selectedSemesterId]);
+  }, [selectedCieId, selectedSemesterId, selectedCycle, semesterCatalog, selectedCieNumber]);
 
-  const loadReport = async (cieId, semId = '') => {
+  const loadReport = async (cieId, semId = '', cycle = selectedCycle) => {
     setLoading(true);
     try {
-      const res = await reportApi.getCieReportData(cieId, semId);
+      const semesterIds = semesterCatalog
+        .filter((semester) => {
+          if (cycle === 'even') return [4, 6].includes(semester.sem_number);
+          if (selectedCieNumber === '3') return [5, 7].includes(semester.sem_number);
+          return [3, 5, 7].includes(semester.sem_number);
+        })
+        .map((semester) => semester.id);
+      const res = await reportApi.getCieReportData(cieId, semId, semesterIds);
       setReportData(res.data);
     } catch (err) {
       console.error('Error loading report preview:', err);
@@ -89,22 +100,40 @@ const Reports = () => {
     hod: { name: 'Dr. Arjun B C', role: 'HOD' }
   };
 
-  const availableSemesters = reportData?.available_semesters || [];
+  const semesterDutyCounts = new Map(
+    (reportData?.available_semesters || []).map((semester) => [semester.id, semester.duty_count])
+  );
+  const availableSemesterNumbers = selectedCycle === 'even'
+    ? [4, 6]
+    : selectedCieNumber === '3'
+      ? [5, 7]
+      : [3, 5, 7];
+  const availableSemesters = semesterCatalog
+    .filter((semester) => availableSemesterNumbers.includes(semester.sem_number))
+    .map((semester) => ({
+      ...semester,
+      duty_count: semesterDutyCounts.get(semester.id) || 0
+    }));
+  const combinedSemesterIds = availableSemesters
+    .filter((semester) => semester.sem_number !== 3)
+    .map((semester) => semester.id);
+  const combinedSemesterLabel = combinedSemesterIds.length > 0
+    ? `Combined (${availableSemesters.filter((semester) => semester.sem_number !== 3).map((semester) => `${semester.sem_number}th`).join(' & ')} Sem)`
+    : 'Combined';
   const selectedSemObj = availableSemesters.find((s) => s.id.toString() === selectedSemesterId.toString());
   
   // Clean active label for downloads
   const activeSemLabel = selectedSemObj
     ? selectedSemObj.name
-    : availableSemesters.length > 0
-      ? `Combined (${availableSemesters.map((s) => `${s.sem_number}th`).join(' & ')} Sem)`
-      : 'All Semesters';
+    : combinedSemesterLabel;
 
-  const filteredSemesters = selectedSemesterId
-    ? (reportData?.semesters_data || []).filter((s) => s.semester_id?.toString() === selectedSemesterId.toString())
-    : reportData?.semesters_data || [];
+  const filteredSemesters = (reportData?.semesters_data || []).filter((semester) => {
+    if (selectedSemesterId) {
+      return semester.semester_id?.toString() === selectedSemesterId.toString();
+    }
 
-  // Determine if 3rd semester is available in this CIE cycle (only in CIE-1 and CIE-2 of Odd Semester)
-  const isSem3Available = selectedCycle === 'odd' && selectedCieNumber !== '3';
+    return availableSemesterNumbers.includes(semester.sem_number) && semester.sem_number !== 3;
+  });
 
   return (
     <div className="space-y-5 font-sans">
@@ -124,8 +153,8 @@ const Reports = () => {
         {/* Export Actions: PDF Circular, Excel Sheet, Duty Slips (Print removed) */}
         <div className="flex items-center gap-2.5 shrink-0">
           <a
-            href={reportApi.downloadPdfUrl(selectedCieId, selectedSemesterId)}
-            onClick={(e) => { e.currentTarget.href = reportApi.downloadPdfUrl(selectedCieId, selectedSemesterId); }}
+            href={reportApi.downloadPdfUrl(selectedCieId, selectedSemesterId, combinedSemesterIds)}
+            onClick={(e) => { e.currentTarget.href = reportApi.downloadPdfUrl(selectedCieId, selectedSemesterId, combinedSemesterIds); }}
             className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all cursor-pointer"
             target="_blank"
             rel="noreferrer"
@@ -136,8 +165,8 @@ const Reports = () => {
           </a>
 
           <a
-            href={reportApi.downloadExcelUrl(selectedCieId, selectedSemesterId)}
-            onClick={(e) => { e.currentTarget.href = reportApi.downloadExcelUrl(selectedCieId, selectedSemesterId); }}
+            href={reportApi.downloadExcelUrl(selectedCieId, selectedSemesterId, combinedSemesterIds)}
+            onClick={(e) => { e.currentTarget.href = reportApi.downloadExcelUrl(selectedCieId, selectedSemesterId, combinedSemesterIds); }}
             className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all cursor-pointer"
             target="_blank"
             rel="noreferrer"
@@ -148,8 +177,8 @@ const Reports = () => {
           </a>
 
           <a
-            href={reportApi.downloadDutySlipsPdfUrl(selectedCieId, selectedSemesterId)}
-            onClick={(e) => { e.currentTarget.href = reportApi.downloadDutySlipsPdfUrl(selectedCieId, selectedSemesterId); }}
+            href={reportApi.downloadDutySlipsPdfUrl(selectedCieId, selectedSemesterId, combinedSemesterIds)}
+            onClick={(e) => { e.currentTarget.href = reportApi.downloadDutySlipsPdfUrl(selectedCieId, selectedSemesterId, combinedSemesterIds); }}
             className="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs transition-all cursor-pointer"
             target="_blank"
             rel="noreferrer"
@@ -208,7 +237,10 @@ const Reports = () => {
           {/* Odd vs Even Semester Switcher */}
           <div className="flex items-center gap-1 bg-slate-100/90 p-1 rounded-xl border border-slate-200 text-xs">
             <button
-              onClick={() => setSelectedCycle('odd')}
+              onClick={() => {
+                setSelectedCycle('odd');
+                setSelectedSemesterId('');
+              }}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                 selectedCycle === 'odd'
                   ? 'bg-slate-900 text-white shadow-xs'
@@ -219,7 +251,10 @@ const Reports = () => {
             </button>
 
             <button
-              onClick={() => setSelectedCycle('even')}
+              onClick={() => {
+                setSelectedCycle('even');
+                setSelectedSemesterId('');
+              }}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                 selectedCycle === 'even'
                   ? 'bg-slate-900 text-white shadow-xs'
@@ -284,7 +319,7 @@ const Reports = () => {
                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
             }`}
           >
-            Combined (All Semesters)
+            {combinedSemesterLabel}
           </button>
 
           {/* Individual Semester Buttons */}
@@ -407,7 +442,7 @@ const Reports = () => {
                       {reportData?.cie?.name || `CIE-${selectedCieNumber}`}
                     </div>
                     <div className="font-bold text-xs sm:text-sm text-slate-900">
-                      Invigilation Duty Allotment {reportData?.academic_year_term || `(AY ${reportData?.academic_year || selectedYear}) ${selectedCycle === 'even' ? 'Even' : 'Odd'}`}
+                      Invigilation Duty Allotment (AY {reportData?.academic_year || selectedYear}) {selectedCycle === 'even' ? 'Even' : 'Odd'}
                     </div>
                   </div>
                   <img
@@ -554,7 +589,7 @@ const Reports = () => {
                       {reportData?.cie?.name || `CIE-${selectedCieNumber}`}
                     </div>
                     <div className="font-bold text-xs sm:text-sm text-slate-900">
-                      Squad Duty Allotment {reportData?.academic_year_term || `(AY ${reportData?.academic_year || selectedYear}) ${selectedCycle === 'even' ? 'Even' : 'Odd'}`}
+                      Squad Duty Allotment (AY {reportData?.academic_year || selectedYear}) {selectedCycle === 'even' ? 'Even' : 'Odd'}
                     </div>
                   </div>
                   <img

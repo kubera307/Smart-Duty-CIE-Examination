@@ -48,6 +48,40 @@ def format_time_slot(st, et):
         return f"{st} to {et}"
 
 
+def get_invigilation_room_assignments(session, duties):
+    if session.exam_rooms:
+        used_duty_ids = set()
+        room_assignments = []
+        for room in session.exam_rooms:
+            duty = next(
+                (d for d in duties if d.exam_room_id == room.id),
+                None
+            )
+            if not duty:
+                duty = next(
+                    (
+                        d for d in duties
+                        if not d.exam_room_id and id(d) not in used_duty_ids
+                    ),
+                    None
+                )
+            if duty:
+                used_duty_ids.add(id(duty))
+            room_assignments.append((room.room_number, duty))
+        return room_assignments
+
+    required = max(1, session.required_invigilators or 1)
+    return [
+        (
+            duty.exam_room.room_number
+            if duty and duty.exam_room
+            else session.room_number or f"Position {index + 1}",
+            duty
+        )
+        for index, duty in enumerate(duties[:required] + [None] * max(0, required - len(duties)))
+    ]
+
+
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 CREST_PATH = os.path.join(BASE_DIR, 'mce_crest.png')
 AIML_PATH = os.path.join(BASE_DIR, 'aiml_logo.png')
@@ -250,24 +284,14 @@ class ReportService:
                     session_start_row = current_row
 
                     # Strictly include duties of active directory faculties only
-                    invig_duties = [d for d in sess.duties if (d.duty_type or '').lower() != 'squad duty' and d.faculty_id in active_dir_ids and d.faculty and d.faculty.is_active]
-                    rooms_to_render = []
-
-                    if sess.exam_rooms:
-                        for er in sess.exam_rooms:
-                            matching_d = next((d for d in invig_duties if d.exam_room_id == er.id), None)
-                            if not matching_d:
-                                matching_d = next((d for d in invig_duties if not d.exam_room_id and d.faculty_id), None)
-                            fac_init = get_faculty_initials(matching_d.faculty.name if matching_d and matching_d.faculty else None)
-                            rooms_to_render.append((er.room_number, fac_init))
-                    elif invig_duties:
-                        for d in invig_duties:
-                            r_no = d.exam_room.room_number if d.exam_room else (sess.room_number or 'AI301')
-                            fac_init = get_faculty_initials(d.faculty.name if d.faculty else None)
-                            rooms_to_render.append((r_no, fac_init))
-                    else:
-                        rooms_to_render.append(('AI301', ''))
-                        rooms_to_render.append(('AI302', ''))
+                    invig_duties = [d for d in sess.duties if d.status in ('ASSIGNED', 'COMPLETED') and (d.duty_type or '').lower() != 'squad duty' and d.faculty_id in active_dir_ids and d.faculty and d.faculty.is_active]
+                    rooms_to_render = [
+                        (
+                            room_number,
+                            get_faculty_initials(duty.faculty.name if duty and duty.faculty else None) or 'UNFILLED'
+                        )
+                        for room_number, duty in get_invigilation_room_assignments(sess, invig_duties)
+                    ]
 
                     for r_idx, (r_no, fac_init) in enumerate(rooms_to_render):
                         is_date_first = (current_row == date_start_row)
@@ -356,8 +380,9 @@ class ReportService:
                     code_p = Paragraph(sess.subject.code if sess.subject else '', cell_norm)
 
                     # Squad duties filtered by active directory faculty only
-                    squad_duties = [d for d in sess.duties if (d.duty_type or '').lower() == 'squad duty' and d.faculty_id in active_dir_ids and d.faculty and d.faculty.is_active]
+                    squad_duties = [d for d in sess.duties if d.status in ('ASSIGNED', 'COMPLETED') and (d.duty_type or '').lower() == 'squad duty' and d.faculty_id in active_dir_ids and d.faculty and d.faculty.is_active]
                     squad_initials = [get_faculty_initials(sd.faculty.name) for sd in squad_duties]
+                    # Leave unassigned squad cells blank for the administrator to complete/sign.
                     squad_str = ', '.join(squad_initials)
                     fac_p = Paragraph(squad_str, cell_norm) if squad_str else Paragraph("", cell_norm)
 
@@ -416,7 +441,10 @@ class ReportService:
 
         # Query all assigned duties
         from models import Duty, Semester
-        duty_query = Duty.query.join(ExamSession).join(Semester).filter(ExamSession.cie_id == cie.id)
+        duty_query = Duty.query.join(ExamSession).join(Semester).filter(
+            ExamSession.cie_id == cie.id,
+            Duty.status.in_(('ASSIGNED', 'COMPLETED'))
+        )
         if selected_semester:
             duty_query = duty_query.filter(ExamSession.semester_id == selected_semester.id)
         elif semester_ids:
@@ -614,10 +642,13 @@ class ReportService:
 
         for s in sessions:
             r_num += 1
-            invig_duties = [d for d in s.duties if (d.duty_type or '').lower() != 'squad duty' and d.faculty_id in active_dir_ids and d.faculty and d.faculty.is_active]
-            fac_inits = [get_faculty_initials(d.faculty.name) for d in invig_duties if d.faculty]
-            fac_str = ', '.join(fac_inits) if fac_inits else 'Standby'
-            rooms_str = ', '.join([r.room_number for r in s.exam_rooms]) or s.room_number or 'AI301'
+            invig_duties = [d for d in s.duties if d.status in ('ASSIGNED', 'COMPLETED') and (d.duty_type or '').lower() != 'squad duty' and d.faculty_id in active_dir_ids and d.faculty and d.faculty.is_active]
+            room_assignments = get_invigilation_room_assignments(s, invig_duties)
+            rooms_str = ', '.join(room_number for room_number, _ in room_assignments)
+            fac_str = ', '.join(
+                get_faculty_initials(duty.faculty.name if duty and duty.faculty else None) or 'UNFILLED'
+                for _, duty in room_assignments
+            )
 
             row_vals = [
                 f"{s.exam_date.strftime('%d.%m.%Y')} ({s.exam_date.strftime('%a')})",
@@ -645,9 +676,9 @@ class ReportService:
 
         for s in sessions:
             r_num2 += 1
-            squad_duties = [d for d in s.duties if (d.duty_type or '').lower() == 'squad duty' and d.faculty_id in active_dir_ids and d.faculty and d.faculty.is_active]
+            squad_duties = [d for d in s.duties if d.status in ('ASSIGNED', 'COMPLETED') and (d.duty_type or '').lower() == 'squad duty' and d.faculty_id in active_dir_ids and d.faculty and d.faculty.is_active]
             s_inits = [get_faculty_initials(d.faculty.name) for d in squad_duties if d.faculty]
-            s_str = ', '.join(s_inits) if s_inits else ''
+            s_str = ', '.join(s_inits)
             rooms_str = ', '.join([r.room_number for r in s.exam_rooms]) or s.room_number or 'AI301'
 
             row_vals = [
@@ -679,7 +710,10 @@ class ReportService:
             c.alignment = Alignment(horizontal="center", vertical="center")
 
         from models import Duty, Semester
-        d_query = Duty.query.join(ExamSession).join(Semester).filter(ExamSession.cie_id == cie.id)
+        d_query = Duty.query.join(ExamSession).join(Semester).filter(
+            ExamSession.cie_id == cie.id,
+            Duty.status.in_(('ASSIGNED', 'COMPLETED'))
+        )
         if selected_semester:
             d_query = d_query.filter(ExamSession.semester_id == selected_semester.id)
         else:

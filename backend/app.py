@@ -1,6 +1,7 @@
 import os
 from flask import Flask, jsonify, send_from_directory, redirect
 from flask_cors import CORS
+from sqlalchemy import inspect
 from config import Config
 from models import db
 from routes import register_routes
@@ -60,6 +61,16 @@ def create_app(config_class=Config):
     # Auto-initialize and seed database within app context
     with app.app_context():
         db.create_all()
+        if db.engine.dialect.name == 'sqlite':
+            columns = {
+                column['name']
+                for column in inspect(db.engine).get_columns('timetable_entries')
+            }
+            if 'section' not in columns:
+                with db.engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        'ALTER TABLE timetable_entries ADD COLUMN section VARCHAR(50)'
+                    )
         seed_database()
 
     return app

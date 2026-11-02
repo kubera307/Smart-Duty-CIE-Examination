@@ -1,6 +1,14 @@
 import re
 
 from .buffer_rules import BufferRuleEvaluator
+from models import TimetableCoverage
+
+
+def normalize_academic_year(value):
+    digits = ''.join(character for character in str(value or '') if character.isdigit())
+    if len(digits) >= 6:
+        return f'{digits[:4]}-{digits[-2:]}'
+    return str(value or '').strip()
 
 class TimetableConflictEngine:
     """
@@ -19,6 +27,10 @@ class TimetableConflictEngine:
         5: 'SAT',
         6: 'SUN'
     }
+
+    @staticmethod
+    def _department_key(department):
+        return 'robot' if 'robot' in (department or '').lower() else 'cse'
 
     @classmethod
     def get_day_of_week(cls, exam_date):
@@ -42,7 +54,43 @@ class TimetableConflictEngine:
         return any(k in sub_name for k in keywords) or bool(re.search(r'\b(pe|pt)\b', sub_name))
 
     @classmethod
-    def check_faculty_timetable_conflicts(cls, faculty, exam_session, regular_semester_ids, buffer_minutes=60):
+    def get_missing_coverage(cls, exam_session, all_semesters):
+        exam_semester = getattr(exam_session, 'semester', None)
+        sem_number = getattr(exam_semester, 'sem_number', None)
+        if sem_number is None:
+            sem_number = getattr(exam_session, 'sem_number', None)
+        if sem_number is None:
+            return ['Exam semester is unavailable; timetable coverage cannot be verified.']
+
+        if sem_number == 3:
+            # Third-semester CIEs run concurrently with Robotics third-semester CIEs.
+            # Only fifth- and seventh-semester classes remain active for invigilation checks.
+            relevant_numbers = (5, 7)
+        elif sem_number in (5, 7):
+            relevant_numbers = (3, 5, 7)
+        else:
+            relevant_numbers = (4, 6)
+        year = normalize_academic_year(
+            getattr(getattr(exam_session, 'cie', None), 'academic_year', None)
+            or getattr(exam_semester, 'academic_year', None)
+        )
+        coverage = TimetableCoverage.query.filter_by(academic_year=year).all()
+        verified = {
+            (row.sem_number, 'robot' if 'robot' in row.department.lower() else 'cse')
+            for row in coverage if row.is_verified
+        }
+        missing = []
+        for number in relevant_numbers:
+            for dept_key, dept_name in (
+                ('cse', 'CSE (AI & ML)'),
+                ('robot', 'Robotics & Artificial Intelligence')
+            ):
+                if (number, dept_key) not in verified:
+                    missing.append(f'{dept_name}, {number}th semester')
+        return missing
+
+    @classmethod
+    def check_faculty_timetable_conflicts(cls, faculty, exam_session, regular_semester_ids=None, buffer_minutes=60, all_semesters=None, coverage_missing=None):
         """
         Args:
             faculty: Faculty object
@@ -61,25 +109,62 @@ class TimetableConflictEngine:
         conflicts = []
         checked_count = 0
 
-        # Skip non-blocking activities; check the same-cycle regular semesters and Robotics classes.
+        exam_semester = getattr(exam_session, 'semester', None)
+        sem_number = getattr(exam_semester, 'sem_number', None)
+        if sem_number is None:
+            sem_number = getattr(exam_session, 'sem_number', None)
+        if sem_number == 3:
+            # Robotics third-semester students are also in CIE at the same time.
+            # Their timetable must not block CSE third-semester invigilation.
+            relevant_numbers = {5, 7}
+        elif sem_number in (5, 7):
+            relevant_numbers = {3, 5, 7}
+        else:
+            relevant_numbers = set((3, 5, 7) if sem_number and sem_number % 2 else (4, 6))
+        regular_ids = set(regular_semester_ids) if regular_semester_ids is not None else None
+        target_year = normalize_academic_year(
+            getattr(getattr(exam_session, 'cie', None), 'academic_year', None)
+            or getattr(exam_semester, 'academic_year', None)
+        )
+
+        # Check only the semester numbers that remain in regular classes for this exam.
         relevant_entries = []
         for entry in faculty.timetable_entries:
             if entry.day_of_week != day_str:
+                continue
+            if entry.semester and entry.semester.sem_number not in relevant_numbers:
+                continue
+            entry_department = (
+                entry.department
+                or (entry.subject.department if entry.subject else '')
+            )
+            target_subject = getattr(exam_session, 'subject', None)
+            target_department = getattr(target_subject, 'department', '') or 'CSE (AI & ML)'
+            same_exam_scope = (
+                entry.semester_id == getattr(exam_session, 'semester_id', None)
+                and cls._department_key(entry_department) == cls._department_key(target_department)
+            )
+            if entry.semester and sem_number in (3, 5, 7):
+                if same_exam_scope:
+                    continue
+            elif entry.semester and regular_ids is not None:
+                if entry.semester_id not in regular_ids and not (
+                    entry.semester_id == getattr(exam_session, 'semester_id', None)
+                    and not same_exam_scope
+                ):
+                    continue
+            elif entry.semester and same_exam_scope:
+                continue
+            if entry.semester and target_year and normalize_academic_year(entry.academic_year) != target_year:
                 continue
 
             # CRITICAL RULE: NEVER consider NSS / Yoga / PE / SCR as a timetable conflict!
             if cls.is_nss_yoga_pe(entry):
                 continue
 
-            dept = (entry.department or (entry.subject.department if entry.subject else '') or '').lower()
-            is_robotics = 'robot' in dept
+            is_robotics = cls._department_key(entry_department) == 'robot'
 
-            # CRITICAL USER RULE:
-            # When assigning duty for 3rd semester exams, the system must strictly read 5th and 7th semester timetables.
-            # Classes in the exam semester itself are suspended during its exams.
-            is_mock_robotics_test = bool(entry.subject and 'TTROBOT' in (entry.subject.code or ''))
-            if entry.semester_id in regular_semester_ids or (is_robotics and is_mock_robotics_test):
-                relevant_entries.append((entry, is_robotics))
+            relevant_entries.append((entry, is_robotics))
 
         checked_count = len(relevant_entries)
 
@@ -109,5 +194,9 @@ class TimetableConflictEngine:
         return {
             'has_conflict': len(conflicts) > 0,
             'conflicts': conflicts,
-            'checked_classes_count': checked_count
+            'checked_classes_count': checked_count,
+            'missing_timetable_coverage': (
+                coverage_missing if coverage_missing is not None
+                else cls.get_missing_coverage(exam_session, all_semesters or [])
+            )
         }
